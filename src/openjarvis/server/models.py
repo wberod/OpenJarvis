@@ -30,6 +30,13 @@ class ChatCompletionRequest(BaseModel):
     tools: Optional[List[Dict[str, Any]]] = None
 
 
+class TTSRequest(BaseModel):
+    text: str
+    voice_id: Optional[str] = None
+    backend: Optional[str] = None
+    output_format: Optional[str] = "mp3"
+
+
 # ---------------------------------------------------------------------------
 # Response models
 # ---------------------------------------------------------------------------

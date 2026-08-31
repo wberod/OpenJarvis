@@ -7,10 +7,12 @@ import logging
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
+import openjarvis.speech  # noqa: F401 — ensures TTS backends are registered
 from openjarvis.core.paths import get_config_dir
+from openjarvis.core.registry import TTSRegistry
 from openjarvis.core.types import Message, Role
 from openjarvis.server.models import (
     ChatCompletionChunk,
@@ -23,6 +25,7 @@ from openjarvis.server.models import (
     ModelListResponse,
     ModelObject,
     StreamChoice,
+    TTSRequest,
     UsageInfo,
 )
 
@@ -1184,6 +1187,37 @@ async def security_scan():
             for r in results
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Text-to-speech endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/v1/tts")
+async def tts(request_body: TTSRequest):
+    """Synthesize text to speech using the configured backend."""
+    backend_key = request_body.backend or "fish"
+    if not TTSRegistry.contains(backend_key):
+        raise HTTPException(status_code=400, detail=f"TTS backend '{backend_key}' not available")
+
+    backend_cls = TTSRegistry.get(backend_key)
+    backend = backend_cls()
+
+    try:
+        result = backend.synthesize(
+            request_body.text,
+            voice_id=request_body.voice_id or "",
+            output_format=request_body.output_format or "mp3",
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        logging.getLogger("openjarvis.server").error("TTS synthesis failed: %s", exc)
+        raise HTTPException(status_code=500, detail="TTS synthesis failed") from exc
+
+    media_type = f"audio/{result.format}"
+    return Response(content=result.audio, media_type=media_type)
 
 
 __all__ = ["router"]
