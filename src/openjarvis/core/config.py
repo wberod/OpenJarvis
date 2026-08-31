@@ -1442,6 +1442,7 @@ class OperatorsConfig:
 class SpeechConfig:
     """Speech-to-text settings."""
 
+    enabled: bool = True
     backend: str = "auto"  # "auto", "faster-whisper", "openai", "deepgram"
     model: str = "base"  # Whisper model size: tiny, base, small, medium, large-v3
     language: str = ""  # Empty = auto-detect

@@ -922,10 +922,14 @@ async def transcribe_speech(request: Request):
 
 @speech_router.get("/health")
 async def speech_health(request: Request):
-    """Check if a speech backend is available."""
+    """Check if a speech backend is available and enabled."""
+    config = getattr(request.app.state, "config", None)
+    enabled = True
+    if config is not None:
+        enabled = getattr(config.speech, "enabled", True)
     backend = getattr(request.app.state, "speech_backend", None)
     if backend is None:
-        return {"available": False, "reason": "No speech backend configured"}
+        return {"available": False, "enabled": enabled, "reason": "No speech backend configured"}
     try:
         available = backend.health()
         reason = None
@@ -941,6 +945,7 @@ async def speech_health(request: Request):
 
     return {
         "available": available,
+        "enabled": enabled and available,
         "backend": backend.backend_id,
         **({"reason": reason} if reason else {}),
     }
