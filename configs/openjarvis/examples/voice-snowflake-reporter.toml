@@ -1,0 +1,37 @@
+# Voice-enabled Snowflake reporter
+# Copy to ~/.openjarvis/config.toml and set the environment variables below.
+#
+# Required environment variables:
+#   export SNOWFLAKE_ACCOUNT="your_account"
+#   export SNOWFLAKE_USER="your_user"
+#   export SNOWFLAKE_PASSWORD="your_password"
+#   export SNOWFLAKE_WAREHOUSE="your_warehouse"
+#   export SNOWFLAKE_DATABASE="your_database"
+#   export SNOWFLAKE_SCHEMA="your_schema"
+#   export SNOWFLAKE_ROLE="your_role"
+#   export OPENAI_API_KEY="your_openai_key"  # only if using openai TTS
+#
+# Install the Snowflake driver:
+#   pip install snowflake-connector-python
+#
+# Example usage:
+#   jarvis ask --agent voice_snowflake_reporter \
+#     --tools snowflake_query,text_to_speech \
+#     "Summarize this month's sales by region"
+
+[engine]
+default = "ollama"
+
+[engine.ollama]
+host = "http://localhost:11434"
+
+[intelligence]
+default_model = "qwen3.5:8b"
+temperature = 0.3
+
+[agent]
+default_agent = "voice_snowflake_reporter"
+max_turns = 10
+
+[tools]
+enabled = ["snowflake_query", "text_to_speech"]

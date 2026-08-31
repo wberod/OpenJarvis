@@ -113,6 +113,11 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.tools.snowflake_query  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.tools.pdf_tool  # noqa: F401
 except ImportError:
     pass
