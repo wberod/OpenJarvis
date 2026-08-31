@@ -1,5 +1,5 @@
-# Voice-enabled Snowflake reporter
-# Copy to ~/.openjarvis/config.toml and set the environment variables below.
+# Voice-enabled Snowflake reporter (MCP)
+# Copy to ~/.openjarvis/config.toml and set the environment variables in .env.
 #
 # Required environment variables:
 #   export SNOWFLAKE_ACCOUNT="your_account"
@@ -10,6 +10,9 @@
 #   export SNOWFLAKE_SCHEMA="your_schema"
 #   export SNOWFLAKE_ROLE="your_role"
 #   export OPENAI_API_KEY="your_openai_key"  # only if using openai TTS
+#
+# Or use the provided .env file:
+#   source .env
 #
 # Install the Snowflake driver:
 #   pip install snowflake-connector-python
@@ -35,3 +38,17 @@ max_turns = 10
 
 [tools]
 enabled = ["snowflake_query", "text_to_speech"]
+
+[tools.mcp]
+enabled = true
+# The snowflake_query tool is provided by a local stdio MCP server.
+servers = """
+[
+  {
+    "name": "snowflake",
+    "command": "python",
+    "args": ["-m", "openjarvis.mcp.snowflake_server"],
+    "include_tools": ["snowflake_query"]
+  }
+]
+"""
