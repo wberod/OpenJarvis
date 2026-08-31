@@ -10,6 +10,9 @@
 #   export SNOWFLAKE_SCHEMA="your_schema"
 #   export SNOWFLAKE_ROLE="your_role"
 #   export OPENAI_API_KEY="your_openai_key"  # only if using openai TTS
+#   export FISH_AUDIO_API_KEY="your_fish_key"  # only if using fish TTS
+#   export FISH_AUDIO_VOICE_ID="your_fish_voice_id"
+#   export FISH_AUDIO_MODEL="s2.1-pro-free"  # optional, defaults to s2.1-pro-free
 #
 # Or use the provided .env file:
 #   source .env

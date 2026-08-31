@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,7 @@ class TextToSpeechTool(BaseTool):
                     },
                     "backend": {
                         "type": "string",
-                        "description": "TTS backend (cartesia, kokoro, openai_tts).",
+                        "description": "TTS backend (cartesia, fish, kokoro, openai_tts).",
                     },
                     "output_dir": {
                         "type": "string",
@@ -57,8 +58,11 @@ class TextToSpeechTool(BaseTool):
         import openjarvis.speech  # noqa: F401
 
         text = params.get("text", "")
-        voice_id = params.get("voice_id", "")
-        backend_key = params.get("backend", "cartesia")
+        voice_id = params.get("voice_id", "") or os.environ.get(
+            "FISH_AUDIO_VOICE_ID", ""
+        )
+        default_backend = "fish" if os.environ.get("FISH_AUDIO_API_KEY") else "cartesia"
+        backend_key = params.get("backend", default_backend)
         _ALIASES = {"openai": "openai_tts"}
         backend_key = _ALIASES.get(backend_key, backend_key)
         output_dir = params.get("output_dir", "")
