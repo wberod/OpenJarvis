@@ -82,8 +82,6 @@ export function ToolCallCard({ toolCall }: Props) {
         {signInUrl && (
           <a
             href={signInUrl}
-            target="_blank"
-            rel="noreferrer"
             className="px-2 py-0.5 rounded text-xs font-medium"
             style={{
               background: 'var(--color-accent)',

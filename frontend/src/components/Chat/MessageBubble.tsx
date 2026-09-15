@@ -186,8 +186,6 @@ export function MessageBubble({ message, isLive = false }: Props) {
       {signInUrl && (
         <a
           href={signInUrl}
-          target="_blank"
-          rel="noreferrer"
           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium mt-2"
           style={{
             background: 'var(--color-accent)',
