@@ -200,18 +200,28 @@ def test_ms365_tools_sign_in_link(tmp_path: Path, monkeypatch) -> None:
     )
 
 
-def test_ms365_tools_email_user_gets_auth_api_link(tmp_path, monkeypatch) -> None:
-    """Email identities are directed to the shared Sheridan auth API for sign-in."""
+def test_ms365_tools_email_user_gets_hub_sign_in_link(tmp_path, monkeypatch) -> None:
+    """Email identities are directed to the SC Hub for sign-in."""
     from openjarvis.tools.ms365_tools import MS365CalendarEventsTool
+
+    class _Empty:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return []
 
     monkeypatch.setenv("OPENJARVIS_MICROSOFT_CLIENT_ID", "cid")
     monkeypatch.setenv("OPENJARVIS_MICROSOFT_CLIENT_SECRET", "sec")
     monkeypatch.setenv("OPENJARVIS_HUB_URL", "https://hub.sheridanfunds.com")
+    monkeypatch.setenv("SUPABASE_HUB_URL", "https://hub.supabase.co")
+    monkeypatch.setenv("SUPABASE_HUB_KEY", "svc")
     tool = MS365CalendarEventsTool(
         credentials_path=str(tmp_path / "shared.json")
     )
     tool._user = "eitan@sheridanfunds.com"
-    res = tool.execute()
+    with patch("openjarvis.connectors.ms365.httpx.get", return_value=_Empty()):
+        res = tool.execute()
     assert res.success is False
     assert res.metadata["auth_required"] is True
     assert res.metadata["sign_in_url"] == "https://hub.sheridanfunds.com"

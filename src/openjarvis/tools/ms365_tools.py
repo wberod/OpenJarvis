@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -31,29 +30,16 @@ from openjarvis.tools._stubs import BaseTool, ToolSpec
 def _ms_auth_start_url() -> Optional[str]:
     """Resolve the shared Sheridan Microsoft sign-in start URL.
 
-    OpenJarvis does not own the Microsoft consent screen.  All Sheridan apps
-    route users through the Calendar/BookMe auth API
-    (``/api/auth/microsoft``).  The start URL can be set explicitly via
-    ``OPENJARVIS_MS_AUTH_URL``; otherwise it is derived from
-    ``MICROSOFT_REDIRECT_URI`` or ``AZURE_REDIRECT_URI`` by replacing the
-    callback path with ``/api/auth/microsoft``.
+    By default, email-based identities sign in through the SC Hub, which
+    stores Microsoft tokens in its Supabase profiles table.  The start URL
+    can be overridden via ``OPENJARVIS_MS_AUTH_URL`` (e.g. the
+    Calendar/BookMe ``/api/auth/microsoft`` endpoint).
     """
-    explicit = os.environ.get("OPENJARVIS_MS_AUTH_URL", "").rstrip("/")
-    if explicit:
-        return explicit
-
-    redirect_uri = (
-        os.environ.get("MICROSOFT_REDIRECT_URI", "")
-        or os.environ.get("AZURE_REDIRECT_URI", "")
-        or ""
+    return (
+        os.environ.get("OPENJARVIS_MS_AUTH_URL", "").rstrip("/")
+        or os.environ.get("OPENJARVIS_HUB_URL", "").rstrip("/")
+        or "https://hub.sheridanfunds.com"
     )
-    if not redirect_uri:
-        return None
-
-    parsed = urlsplit(redirect_uri)
-    # Drop the existing callback path and point to the shared auth API.
-    path = "/api/auth/microsoft"
-    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def _not_connected(user_id: Optional[str] = None) -> ToolResult:
@@ -85,14 +71,27 @@ def _not_connected(user_id: Optional[str] = None) -> ToolResult:
             metadata={"auth_required": True, "configured": False},
         )
 
-    # Email identities authenticate through the shared Sheridan auth API.
+    # Email identities authenticate through the SC Hub.
     if user_id and "@" in user_id:
-        sign_in_url = _ms_auth_start_url() or os.environ.get(
-            "OPENJARVIS_HUB_URL", "https://hub.sheridanfunds.com"
-        ).rstrip("/")
-        content = (
-            f"Microsoft 365 sign-in required: {sign_in_url}"
-        )
+        sign_in_url = _ms_auth_start_url()
+        if not (os.environ.get("SUPABASE_HUB_URL") and os.environ.get("SUPABASE_HUB_KEY")):
+            content = (
+                "OpenJarvis cannot read Microsoft tokens from the SC Hub "
+                f"({sign_in_url}). Please set SUPABASE_HUB_URL and SUPABASE_HUB_KEY "
+                "in the environment, then sign in at the hub."
+            )
+            return ToolResult(
+                tool_name="ms365",
+                content=content,
+                success=False,
+                metadata={
+                    "auth_required": True,
+                    "configured": True,
+                    "sign_in_url": sign_in_url,
+                    "hub_misconfigured": True,
+                },
+            )
+        content = f"Microsoft 365 sign-in required: {sign_in_url}"
     else:
         # Non-email identity (dev / standalone): the OAuth consent flow is
         # served by the API server and files tokens per user via ``state``.
