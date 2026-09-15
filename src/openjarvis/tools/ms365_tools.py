@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -30,16 +31,19 @@ from openjarvis.tools._stubs import BaseTool, ToolSpec
 def _ms_auth_start_url() -> Optional[str]:
     """Resolve the shared Sheridan Microsoft sign-in start URL.
 
-    By default, email-based identities sign in through the SC Hub, which
-    stores Microsoft tokens in its Supabase profiles table.  The start URL
-    can be overridden via ``OPENJARVIS_MS_AUTH_URL`` (e.g. the
-    Calendar/BookMe ``/api/auth/microsoft`` endpoint).
+    Email-based identities sign in through the SC Hub's ``/auth/microsoft``
+    route by default, which stores Microsoft tokens in its Supabase profiles
+    table.  This can be overridden via ``OPENJARVIS_MS_AUTH_URL``.
     """
-    return (
-        os.environ.get("OPENJARVIS_MS_AUTH_URL", "").rstrip("/")
-        or os.environ.get("OPENJARVIS_HUB_URL", "").rstrip("/")
+    explicit = os.environ.get("OPENJARVIS_MS_AUTH_URL", "").rstrip("/")
+    if explicit:
+        return explicit
+
+    hub = (
+        os.environ.get("OPENJARVIS_HUB_URL", "").rstrip("/")
         or "https://hub.sheridanfunds.com"
     )
+    return f"{hub}/auth/microsoft"
 
 
 def _not_connected(user_id: Optional[str] = None) -> ToolResult:
@@ -74,6 +78,9 @@ def _not_connected(user_id: Optional[str] = None) -> ToolResult:
     # Email identities authenticate through the SC Hub.
     if user_id and "@" in user_id:
         sign_in_url = _ms_auth_start_url()
+        return_url = os.environ.get("OPENJARVIS_PUBLIC_URL", "").rstrip("/")
+        if sign_in_url and return_url:
+            sign_in_url = f"{sign_in_url}?next={quote(return_url, safe='')}"
         hub_url = (
             os.environ.get("SUPABASE_HUB_URL", "")
             or os.environ.get("HUB_SUPABASE_URL", "")

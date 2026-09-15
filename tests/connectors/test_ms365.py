@@ -224,7 +224,7 @@ def test_ms365_tools_email_user_gets_hub_sign_in_link(tmp_path, monkeypatch) -> 
         res = tool.execute()
     assert res.success is False
     assert res.metadata["auth_required"] is True
-    assert res.metadata["sign_in_url"] == "https://hub.sheridanfunds.com"
+    assert res.metadata["sign_in_url"] == "https://hub.sheridanfunds.com/auth/microsoft"
     assert res.metadata["sign_in_url"] in res.content
 
 
