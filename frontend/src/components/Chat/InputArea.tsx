@@ -284,6 +284,7 @@ export function InputArea() {
 
     let accumulatedContent = '';
     let usage: TokenUsage | undefined;
+    let responseMetadata: Record<string, unknown> | undefined;
     let complexity: { score: number; tier: string; suggested_max_tokens: number } | undefined;
     const toolCalls: ToolCallInfo[] = [];
     const researchTraces: ResearchSearchTrace[] = [];
@@ -323,6 +324,7 @@ export function InputArea() {
           user_id: getUserId(),
         });
         accumulatedContent = result.content || '';
+        responseMetadata = result.metadata;
         for (const tr of result.tool_results) {
           toolCalls.push({
             id: generateId(),
@@ -333,6 +335,7 @@ export function InputArea() {
                 : JSON.stringify(tr.arguments || {}),
             status: tr.success ? 'success' : 'error',
             result: tr.content,
+            metadata: tr.metadata,
           });
         }
       } else if (deepResearch) {
@@ -597,6 +600,7 @@ export function InputArea() {
         audioMeta,
         researchTraces.length > 0 ? researchTraces : undefined,
         researchSourcesByRef.size > 0 ? flushSources() : undefined,
+        responseMetadata,
       );
       if (timerRef.current) {
         clearInterval(timerRef.current);

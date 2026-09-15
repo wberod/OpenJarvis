@@ -36,6 +36,9 @@ export function ToolCallCard({ toolCall }: Props) {
   const config = statusConfig[toolCall.status];
   const StatusIcon = config.icon;
   const preview = previewArgs(toolCall.arguments);
+  const authMeta = toolCall.metadata || {};
+  const signInUrl =
+    typeof authMeta.sign_in_url === 'string' ? authMeta.sign_in_url : undefined;
 
   return (
     <div
@@ -76,6 +79,23 @@ export function ToolCallCard({ toolCall }: Props) {
           </span>
         )}
         <div className="flex-1" />
+        {signInUrl && (
+          <a
+            href={signInUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="px-2 py-0.5 rounded text-xs font-medium"
+            style={{
+              background: 'var(--color-accent)',
+              color: 'var(--color-accent-text, #fff)',
+              marginRight: 8,
+              flexShrink: 0,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            Sign in
+          </a>
+        )}
         {toolCall.latency != null && (
           <span
             style={{

@@ -289,6 +289,7 @@ export interface AgentRunResponse {
     content: string;
     success: boolean;
     arguments: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
   }>;
   turns: number;
   model: string;

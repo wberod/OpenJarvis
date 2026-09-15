@@ -124,6 +124,11 @@ export function MessageBubble({ message, isLive = false }: Props) {
 
   const cleanContent = useMemo(() => stripThinkTags(message.content), [message.content]);
 
+  const signInUrl =
+    (message.metadata?.sign_in_url as string | undefined) ||
+    message.toolCalls?.find((tc) => tc.metadata?.sign_in_url)?.metadata
+      ?.sign_in_url as string | undefined;
+
   // Build a ref→source lookup once per render. Memoized so the rehype plugin
   // identity stays stable until the source list actually changes.
   const sourcesMap = useMemo(() => {
@@ -176,6 +181,21 @@ export function MessageBubble({ message, isLive = false }: Props) {
             {cleanContent}
           </ReactMarkdown>
         </div>
+      )}
+
+      {signInUrl && (
+        <a
+          href={signInUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium mt-2"
+          style={{
+            background: 'var(--color-accent)',
+            color: 'var(--color-accent-text, #fff)',
+          }}
+        >
+          Sign in with Microsoft
+        </a>
       )}
 
       {/* Footer: copy + x-ray */}

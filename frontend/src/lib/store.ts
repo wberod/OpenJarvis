@@ -180,6 +180,7 @@ interface AppState {
     audio?: { url: string },
     researchTraces?: ResearchSearchTrace[],
     researchSources?: ResearchSource[],
+    metadata?: Record<string, unknown>,
   ) => void;
   setStreamState: (state: Partial<StreamState>) => void;
   resetStream: () => void;
@@ -431,6 +432,7 @@ export const useAppStore = create<AppState>((set, get) => {
       audio?: { url: string },
       researchTraces?: ResearchSearchTrace[],
       researchSources?: ResearchSource[],
+      metadata?: Record<string, unknown>,
     ) => {
       const store = loadConversations();
       const conv = store.conversations[conversationId];
@@ -444,6 +446,7 @@ export const useAppStore = create<AppState>((set, get) => {
         if (audio) lastMsg.audio = audio;
         if (researchTraces) lastMsg.researchTraces = researchTraces;
         if (researchSources) lastMsg.researchSources = researchSources;
+        if (metadata) lastMsg.metadata = metadata;
         conv.updatedAt = Date.now();
         saveConversations(store);
         set({ messages: [...conv.messages] });

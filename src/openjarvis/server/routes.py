@@ -504,6 +504,7 @@ def _run_managed_agent(
             "content": tr.content,
             "success": tr.success,
             "arguments": getattr(tr, "metadata", {}).get("arguments", {}),
+            "metadata": getattr(tr, "metadata", {}),
         }
         for tr in getattr(result, "tool_results", [])
     ]
@@ -578,6 +579,7 @@ async def agent_run(request_body: AgentRunRequest, request: Request):
                 "content": tr.content,
                 "success": tr.success,
                 "arguments": tr.metadata.get("arguments", {}),
+                "metadata": tr.metadata,
             }
             for tr in getattr(result, "tool_results", [])
         ],

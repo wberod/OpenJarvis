@@ -42,6 +42,7 @@ export interface ToolCallInfo {
   status: 'running' | 'success' | 'error';
   result?: string;
   latency?: number;
+  metadata?: Record<string, unknown>;
 }
 
 export interface TokenUsage {
@@ -135,6 +136,7 @@ export interface ChatMessage {
   audio?: { url: string };
   images?: string[];
   documents?: DocumentAttachment[];
+  metadata?: Record<string, unknown>;
 }
 
 export interface Conversation {
