@@ -19,6 +19,24 @@ from openjarvis.core.types import Conversation, Message, Role, ToolResult
 from openjarvis.engine._stubs import InferenceEngine
 
 
+# ---------------------------------------------------------------------------
+# Calendar tool nudging helpers
+# ---------------------------------------------------------------------------
+
+_CALENDAR_KEYWORDS_RE = re.compile(
+    r"\b(?:create|add|set|schedule|make|remind|reminder|calendar|event|"
+    r"appointment|alarm|meal|breakfast|lunch|dinner|snack)\b",
+    re.IGNORECASE,
+)
+
+_CALENDAR_TOOL_DIRECTIVE = (
+    "CRITICAL: If this request involves creating calendar events or "
+    "reminders, call the create_multiple_calendar_events tool (or "
+    "create_calendar_event for a single event) immediately. Do not reply "
+    "with a confirmation; only reply after the tool has returned success."
+)
+
+
 @dataclass(slots=True)
 class AgentContext:
     """Runtime context handed to an agent on each invocation."""
@@ -175,7 +193,24 @@ class BaseAgent(ABC):
             messages.append(Message(role=Role.SYSTEM, content=effective_system_prompt))
         if context and context.conversation.messages:
             messages.extend(context.conversation.messages)
-        messages.append(Message(role=Role.USER, content=input))
+
+        # If this agent has calendar tools and the user appears to be asking for
+        # a calendar event/reminder, append a hard tool-use directive to the
+        # final user message. Avoid duplicating the directive if another layer
+        # (e.g. AgentExecutor) already injected it.
+        has_calendar_tool = any(
+            getattr(t, "tool_id", "") in {"create_calendar_event", "create_multiple_calendar_events"}
+            for t in getattr(self, "_tools", [])
+        )
+        if (
+            has_calendar_tool
+            and _CALENDAR_KEYWORDS_RE.search(input)
+            and _CALENDAR_TOOL_DIRECTIVE not in input
+        ):
+            input = f"{input}\n\n{_CALENDAR_TOOL_DIRECTIVE}"
+
+        final_images = context.metadata.get("images") if context and context.metadata else None
+        messages.append(Message(role=Role.USER, content=input, images=final_images))
         return messages
 
     def _generate(self, messages: list[Message], **extra_kwargs: Any) -> dict:

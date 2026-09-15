@@ -38,6 +38,10 @@ class AgentSpawnTool(BaseTool):
 
     tool_id = "agent_spawn"
 
+    # Injected by AgentExecutor._inject_tool_deps — when present, spawning
+    # creates a real persistent managed agent instead of a stub entry.
+    _manager: Any = None
+
     @property
     def spec(self) -> ToolSpec:
         return ToolSpec(
@@ -53,12 +57,26 @@ class AgentSpawnTool(BaseTool):
                         "type": "string",
                         "description": (
                             "Agent registry key (e.g. 'simple',"
-                            " 'orchestrator', 'native_react')."
+                            " 'orchestrator', 'monitor_operative')."
+                        ),
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Display name for the spawned agent."
+                            " Auto-generated if not provided."
                         ),
                     },
                     "query": {
                         "type": "string",
                         "description": ("Optional initial query to send to the agent."),
+                    },
+                    "system_prompt": {
+                        "type": "string",
+                        "description": (
+                            "Optional system prompt / instruction for the"
+                            " spawned agent."
+                        ),
                     },
                     "tools": {
                         "type": "string",
@@ -88,9 +106,58 @@ class AgentSpawnTool(BaseTool):
                 success=False,
             )
 
-        agent_id = params.get("agent_id") or uuid.uuid4().hex[:12]
         query = params.get("query", "")
         tools = params.get("tools", "")
+        name = params.get("name", "")
+        system_prompt = params.get("system_prompt", "")
+
+        # Real managed-agent path (persistent, schedulable, visible in UI).
+        if self._manager is not None:
+            try:
+                config: Dict[str, Any] = {"schedule_type": "manual"}
+                if tools:
+                    config["tools"] = [
+                        t.strip() for t in tools.split(",") if t.strip()
+                    ]
+                if system_prompt:
+                    config["system_prompt"] = system_prompt
+                if query:
+                    config["instruction"] = query
+                record = self._manager.create_agent(
+                    name=name or f"{agent_type}-subagent",
+                    agent_type=agent_type,
+                    config=config,
+                )
+                agent_id = record["id"]
+                if query:
+                    self._manager.send_message(agent_id, query, mode="queued")
+                return ToolResult(
+                    tool_name="agent_spawn",
+                    content=json.dumps(
+                        {
+                            "agent_id": agent_id,
+                            "name": record.get("name"),
+                            "agent_type": agent_type,
+                            "managed": True,
+                            "status": record.get("status", "idle"),
+                            "note": (
+                                "Agent created. Its queued message will run"
+                                " on the next tick; use agent_send to add"
+                                " follow-up messages."
+                            ),
+                        }
+                    ),
+                    success=True,
+                )
+            except Exception as exc:
+                return ToolResult(
+                    tool_name="agent_spawn",
+                    content=f"Failed to create managed agent: {exc}",
+                    success=False,
+                )
+
+        # Fallback: in-memory stub (no AgentManager injected).
+        agent_id = params.get("agent_id") or uuid.uuid4().hex[:12]
 
         entry: Dict[str, Any] = {
             "agent_id": agent_id,
@@ -131,6 +198,8 @@ class AgentSendTool(BaseTool):
 
     tool_id = "agent_send"
 
+    _manager: Any = None
+
     @property
     def spec(self) -> ToolSpec:
         return ToolSpec(
@@ -165,17 +234,45 @@ class AgentSendTool(BaseTool):
                 success=False,
             )
 
-        if agent_id not in _SPAWNED_AGENTS:
-            return ToolResult(
-                tool_name="agent_send",
-                content=f"Agent '{agent_id}' not found.",
-                success=False,
-            )
-
         if not message:
             return ToolResult(
                 tool_name="agent_send",
                 content="No message provided.",
+                success=False,
+            )
+
+        # Real managed-agent path.
+        if self._manager is not None:
+            try:
+                if self._manager.get_agent(agent_id) is None:
+                    return ToolResult(
+                        tool_name="agent_send",
+                        content=f"Managed agent '{agent_id}' not found.",
+                        success=False,
+                    )
+                self._manager.send_message(agent_id, message, mode="queued")
+                return ToolResult(
+                    tool_name="agent_send",
+                    content=json.dumps(
+                        {
+                            "agent_id": agent_id,
+                            "delivered": True,
+                            "managed": True,
+                        }
+                    ),
+                    success=True,
+                )
+            except Exception as exc:
+                return ToolResult(
+                    tool_name="agent_send",
+                    content=f"Failed to message managed agent: {exc}",
+                    success=False,
+                )
+
+        if agent_id not in _SPAWNED_AGENTS:
+            return ToolResult(
+                tool_name="agent_send",
+                content=f"Agent '{agent_id}' not found.",
                 success=False,
             )
 
@@ -218,6 +315,8 @@ class AgentListTool(BaseTool):
 
     tool_id = "agent_list"
 
+    _manager: Any = None
+
     @property
     def spec(self) -> ToolSpec:
         return ToolSpec(
@@ -234,6 +333,29 @@ class AgentListTool(BaseTool):
         )
 
     def execute(self, **params: Any) -> ToolResult:
+        if self._manager is not None:
+            try:
+                agents = [
+                    {
+                        "agent_id": a.get("id"),
+                        "name": a.get("name"),
+                        "agent_type": a.get("agent_type"),
+                        "status": a.get("status"),
+                    }
+                    for a in self._manager.list_agents()
+                ]
+                return ToolResult(
+                    tool_name="agent_list",
+                    content=json.dumps(agents, indent=2) or "[]",
+                    success=True,
+                )
+            except Exception as exc:
+                return ToolResult(
+                    tool_name="agent_list",
+                    content=f"Failed to list managed agents: {exc}",
+                    success=False,
+                )
+
         if not _SPAWNED_AGENTS:
             return ToolResult(
                 tool_name="agent_list",
@@ -270,6 +392,8 @@ class AgentKillTool(BaseTool):
 
     tool_id = "agent_kill"
 
+    _manager: Any = None
+
     @property
     def spec(self) -> ToolSpec:
         return ToolSpec(
@@ -299,6 +423,29 @@ class AgentKillTool(BaseTool):
                 content="No agent_id provided.",
                 success=False,
             )
+
+        if self._manager is not None:
+            try:
+                if self._manager.get_agent(agent_id) is None:
+                    return ToolResult(
+                        tool_name="agent_kill",
+                        content=f"Managed agent '{agent_id}' not found.",
+                        success=False,
+                    )
+                self._manager.delete_agent(agent_id)
+                return ToolResult(
+                    tool_name="agent_kill",
+                    content=json.dumps(
+                        {"agent_id": agent_id, "status": "deleted"}
+                    ),
+                    success=True,
+                )
+            except Exception as exc:
+                return ToolResult(
+                    tool_name="agent_kill",
+                    content=f"Failed to delete managed agent: {exc}",
+                    success=False,
+                )
 
         if agent_id not in _SPAWNED_AGENTS:
             return ToolResult(

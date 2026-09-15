@@ -118,7 +118,56 @@ OAUTH_PROVIDERS: Dict[str, OAuthProvider] = {
         connector_ids=("spotify",),
         credential_files=("spotify.json",),
     ),
+    # Microsoft identity platform (Entra ID). The ``{tenant}`` placeholder in
+    # both endpoints is expanded by ``provider_endpoint()`` — controlled via
+    # OPENJARVIS_MICROSOFT_TENANT_ID / MICROSOFT_TENANT_ID (default "common").
+    "microsoft": OAuthProvider(
+        name="microsoft",
+        display_name="Microsoft 365",
+        auth_endpoint=(
+            "https://login.microsoftonline.com/{tenant}"
+            "/oauth2/v2.0/authorize"
+        ),
+        token_endpoint=(
+            "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+        ),
+        scopes=[
+            "openid",
+            "profile",
+            "email",
+            "offline_access",
+            "User.Read",
+            "Mail.Read",
+            "Calendars.ReadWrite",
+        ],
+        setup_url=(
+            "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps"
+            "/ApplicationsListBlade"
+        ),
+        setup_hint=(
+            "Register an Entra app, add the redirect URI shown by the OAuth "
+            "flow, then set OPENJARVIS_MICROSOFT_CLIENT_ID and "
+            "OPENJARVIS_MICROSOFT_CLIENT_SECRET"
+        ),
+        extra_auth_params={"response_mode": "query"},
+        connector_ids=("ms365",),
+        credential_files=("ms365.json",),
+    ),
 }
+
+
+def microsoft_tenant() -> str:
+    """Return the configured Entra tenant ID (default ``common``)."""
+    return (
+        os.environ.get("OPENJARVIS_MICROSOFT_TENANT_ID")
+        or os.environ.get("MICROSOFT_TENANT_ID")
+        or "common"
+    )
+
+
+def provider_endpoint(url: str) -> str:
+    """Expand ``{tenant}`` placeholders in a provider endpoint URL."""
+    return url.replace("{tenant}", microsoft_tenant())
 
 
 def get_provider_for_connector(connector_id: str) -> Optional[OAuthProvider]:
@@ -150,10 +199,17 @@ def get_client_credentials(
         if tokens and tokens.get("client_id") and tokens.get("client_secret"):
             return tokens["client_id"], tokens["client_secret"]
 
-    # Check environment variables
+    # Check environment variables (prefixed OpenJarvis form first, then the
+    # unprefixed {NAME}_CLIENT_* form used by shared Sheridan integrations).
     prefix = f"OPENJARVIS_{provider.name.upper()}"
     env_id = os.environ.get(f"{prefix}_CLIENT_ID", "")
     env_secret = os.environ.get(f"{prefix}_CLIENT_SECRET", "")
+    if env_id and env_secret:
+        return env_id, env_secret
+
+    plain = provider.name.upper()
+    env_id = os.environ.get(f"{plain}_CLIENT_ID", "")
+    env_secret = os.environ.get(f"{plain}_CLIENT_SECRET", "")
     if env_id and env_secret:
         return env_id, env_secret
 
@@ -640,7 +696,12 @@ def _exchange_token(
         data["client_id"] = client_id
         data["client_secret"] = client_secret
 
-    resp = httpx.post(provider.token_endpoint, data=data, headers=headers, timeout=30.0)
+    resp = httpx.post(
+        provider_endpoint(provider.token_endpoint),
+        data=data,
+        headers=headers,
+        timeout=30.0,
+    )
     resp.raise_for_status()
     return resp.json()
 
@@ -690,7 +751,7 @@ def run_connector_oauth(
         "scope": " ".join(provider.scopes),
         **provider.extra_auth_params,
     }
-    auth_url = f"{provider.auth_endpoint}?{urlencode(params)}"
+    auth_url = f"{provider_endpoint(provider.auth_endpoint)}?{urlencode(params)}"
 
     # Open browser and wait for callback
     open_browser(auth_url)

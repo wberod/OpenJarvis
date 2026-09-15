@@ -498,7 +498,8 @@ class MonitorOperativeAgent(ToolUsingAgent):
             messages.extend(session_messages)
         if context and context.conversation.messages:
             messages.extend(context.conversation.messages)
-        messages.append(Message(role=Role.USER, content=input))
+        final_images = context.metadata.get("images") if context and context.metadata else None
+        messages.append(Message(role=Role.USER, content=input, images=final_images))
         return messages
 
     def _build_tool_descriptions(self) -> str:

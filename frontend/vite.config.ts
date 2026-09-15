@@ -54,7 +54,10 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/v1': process.env.VITE_API_URL || 'http://localhost:8000',
+      '/v1': {
+        target: process.env.VITE_API_URL || 'http://localhost:8000',
+        ws: true,
+      },
       '/health': process.env.VITE_API_URL || 'http://localhost:8000',
       '/api': process.env.VITE_API_URL || 'http://localhost:8000',
     },

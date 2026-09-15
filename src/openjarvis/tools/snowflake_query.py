@@ -10,6 +10,21 @@ from openjarvis.core.types import ToolResult
 from openjarvis.tools._stubs import BaseTool, ToolSpec
 from openjarvis.tools.db_query import _format_table, _is_read_only_query
 
+# `jarvis init` writes SNOWFLAKE_* placeholders such as "your_account" into
+# .env. Treating them as configured produces a confusing DNS/404 login error
+# instead of an honest "not configured yet".
+_PLACEHOLDER_PREFIXES = ("your_", "<", "changeme", "xxx", "todo")
+
+
+def _is_unset(value: Any) -> bool:
+    """Return True when a connection value is missing or still a placeholder."""
+    if not value or not isinstance(value, str):
+        return not value
+    lowered = value.strip().lower()
+    if not lowered:
+        return True
+    return lowered.startswith(_PLACEHOLDER_PREFIXES)
+
 
 @ToolRegistry.register("snowflake_query")
 class SnowflakeQueryTool(BaseTool):
@@ -103,13 +118,24 @@ class SnowflakeQueryTool(BaseTool):
             )
 
         conn_args = self._build_connection_args(params)
-        if not conn_args.get("account") or not conn_args.get("user"):
+        missing = [
+            env
+            for env, key in (
+                ("SNOWFLAKE_ACCOUNT", "account"),
+                ("SNOWFLAKE_USER", "user"),
+            )
+            if _is_unset(conn_args.get(key))
+        ]
+        if missing:
             return ToolResult(
                 tool_name="snowflake_query",
                 content=(
-                    "Snowflake account and user are required."
-                    " Set SNOWFLAKE_ACCOUNT and SNOWFLAKE_USER environment variables,"
-                    " or pass them in the connection config."
+                    "Snowflake is not configured on this machine: "
+                    f"{', '.join(missing)} not set. This tool only reads a "
+                    "business data warehouse — it holds no email, messages, "
+                    "notes, calendar, or files, so it cannot be used as a "
+                    "substitute for those. Tell the user Snowflake is "
+                    "unconfigured and name the missing variables."
                 ),
                 success=False,
             )

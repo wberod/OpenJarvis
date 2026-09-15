@@ -3,6 +3,19 @@ import { Bell, CheckCircle, ChevronDown, ChevronUp, Clock, XCircle } from 'lucid
 import { approveAction, denyAction, fetchPendingApprovals } from '../lib/api';
 import type { PendingApproval } from '../lib/api';
 
+const ACTION_LABELS: Record<string, string> = {
+  tool_call: 'Tool request',
+  email_delete: 'Delete email',
+  sms_draft_reply: 'Reply to SMS',
+};
+
+function formatActionType(type: string, payload?: Record<string, unknown> | null): string {
+  if (type === 'tool_call' && payload && typeof payload.tool === 'string') {
+    return `Tool: ${payload.tool}`;
+  }
+  return ACTION_LABELS[type] || type;
+}
+
 const TIER_STYLES: Record<string, { label: string; color: string; bg: string }> = {
   trivial: { label: 'Trivial', color: 'var(--color-text-secondary)', bg: 'color-mix(in srgb, var(--color-text-secondary) 10%, transparent)' },
   low:     { label: 'Low',     color: '#3b82f6',                    bg: 'rgba(59,130,246,0.12)' },
@@ -166,7 +179,7 @@ export function ApprovalBell() {
                         className="text-[11px] font-mono font-semibold"
                         style={{ color: 'var(--color-accent)' }}
                       >
-                        {action.action_type}
+                        {formatActionType(action.action_type, action.payload)}
                       </span>
                       <div className="flex items-center gap-2">
                         <span

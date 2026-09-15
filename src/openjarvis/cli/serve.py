@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import faulthandler
 import logging
 import sys
 
@@ -9,6 +10,7 @@ import click
 from rich.console import Console
 
 from openjarvis.cli._banner import print_banner
+from openjarvis.cli.log_config import setup_logging
 from openjarvis.core.config import load_config
 from openjarvis.core.events import EventBus
 from openjarvis.core.paths import get_config_dir
@@ -21,6 +23,7 @@ from openjarvis.intelligence import (
     merge_discovered_models,
     register_builtin_models,
 )
+from openjarvis.server.confirm_callback import ServerToolApprovalCallback
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +83,56 @@ def _resolve_server_model(
     return available[0] if available else ""
 
 
+def _resolve_allowed_tool_names(config) -> set[str]:
+    """Return the union of configured agent tools and enabled tools."""
+    defaults = {"think", "calculator", "web_search"}
+    names: set[str] = set()
+    for source in (config.agent.tools, config.tools.enabled):
+        if not source:
+            continue
+        if isinstance(source, list):
+            names.update(
+                t.strip() for t in source if isinstance(t, str) and t.strip()
+            )
+        else:
+            names.update(t.strip() for t in source.split(",") if t.strip())
+    return names or defaults
+
+
+def _build_server_tool(name: str, tool_cls, config):
+    """Instantiate a tool for the server agent, applying config when needed."""
+    from openjarvis.tools._stubs import BaseTool
+
+    if isinstance(tool_cls, BaseTool):
+        return tool_cls
+
+    if name in ("file_read", "file_write"):
+        key = "allowed_read_dirs" if name == "file_read" else "allowed_write_dirs"
+        allowed = _get_filesystem_dirs(config, key)
+        return tool_cls(allowed_dirs=allowed)
+
+    if name == "open_app":
+        aliases = getattr(
+            getattr(config, "tools", None),
+            "open_app_aliases",
+            None,
+        )
+        return tool_cls(custom_aliases=aliases)
+
+    return tool_cls()
+
+
+def _get_filesystem_dirs(config, key: str) -> list[str] | None:
+    """Return filesystem allowed directories from config, if present."""
+    tools_cfg = getattr(config, "tools", None)
+    if tools_cfg is None:
+        return None
+    fs_cfg = getattr(tools_cfg, "filesystem", None)
+    if fs_cfg is None:
+        return None
+    return getattr(fs_cfg, key, None)
+
+
 @click.command()
 @click.option("--host", default=None, help="Bind address (default: config).")
 @click.option(
@@ -107,6 +160,14 @@ def serve(
     agent_name: str | None,
 ) -> None:
     """Start the OpenAI-compatible API server."""
+    # Always capture a native crash traceback and persist server logs.
+    log_dir = get_config_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    fault_path = log_dir / "server-fault.log"
+    fault_file = open(fault_path, "a", encoding="utf-8")
+    faulthandler.enable(file=fault_file)
+    setup_logging(verbose=True, log_file=log_dir / "server.log")
+
     print_banner(quiet=(ctx.obj or {}).get("quiet", False))
     console = Console(stderr=True)
 
@@ -295,21 +356,7 @@ def serve(
                     from openjarvis.core.registry import ToolRegistry
                     from openjarvis.tools._stubs import BaseTool
 
-                    _DEFAULT_TOOLS = {"think", "calculator", "web_search"}
-                    configured = config.agent.tools
-                    if configured:
-                        if isinstance(configured, list):
-                            allowed = {
-                                t.strip()
-                                for t in configured
-                                if isinstance(t, str) and t.strip()
-                            }
-                        else:
-                            allowed = {
-                                t.strip() for t in configured.split(",") if t.strip()
-                            }
-                    else:
-                        allowed = _DEFAULT_TOOLS
+                    allowed = _resolve_allowed_tool_names(config)
 
                     tools = []
                     for name in ToolRegistry.keys():
@@ -319,7 +366,7 @@ def serve(
                         if isinstance(tool_cls, type) and issubclass(
                             tool_cls, BaseTool
                         ):
-                            tools.append(tool_cls())
+                            tools.append(_build_server_tool(name, tool_cls, config))
                         elif isinstance(tool_cls, BaseTool):
                             tools.append(tool_cls)
 
@@ -329,7 +376,7 @@ def serve(
 
                     mcp_tools, mcp_clients = load_mcp_tools_from_config(
                         config.tools.mcp,
-                        allowed_names=allowed if configured else None,
+                        allowed_names=allowed,
                     )
                     if mcp_tools:
                         existing = {t.spec.name for t in tools}
@@ -345,6 +392,8 @@ def serve(
 
                 if getattr(agent_cls, "accepts_tools", False):
                     agent_kwargs["max_turns"] = config.agent.max_turns
+                    agent_kwargs["interactive"] = True
+                    agent_kwargs["confirm_callback"] = ServerToolApprovalCallback()
 
                 agent = agent_cls(engine, model_name, **agent_kwargs)
                 # Pin MCP transports to the agent's lifetime so HTTP
@@ -399,30 +448,18 @@ def serve(
                         from openjarvis.core.registry import ToolRegistry
                         from openjarvis.tools._stubs import BaseTool
 
-                        _DEFAULT_TOOLS = {"think", "calculator", "web_search"}
-                        configured = config.agent.tools
-                        if configured:
-                            if isinstance(configured, list):
-                                _allowed = {
-                                    t.strip()
-                                    for t in configured
-                                    if isinstance(t, str) and t.strip()
-                                }
-                            else:
-                                _allowed = {
-                                    t.strip()
-                                    for t in configured.split(",")
-                                    if t.strip()
-                                }
-                        else:
-                            _allowed = _DEFAULT_TOOLS
+                        _allowed = _resolve_allowed_tool_names(config)
 
                         for _tname in ToolRegistry.keys():
                             if _tname not in _allowed:
                                 continue
                             _tcls = ToolRegistry.get(_tname)
-                            if isinstance(_tcls, type) and issubclass(_tcls, BaseTool):
-                                _channel_tools.append(_tcls())
+                            if isinstance(_tcls, type) and issubclass(
+                                _tcls, BaseTool
+                            ):
+                                _channel_tools.append(
+                                    _build_server_tool(_tname, _tcls, config)
+                                )
                             elif isinstance(_tcls, BaseTool):
                                 _channel_tools.append(_tcls)
 
@@ -433,7 +470,7 @@ def serve(
 
                         _ch_mcp_tools, _ch_mcp_clients = load_mcp_tools_from_config(
                             config.tools.mcp,
-                            allowed_names=_allowed if configured else None,
+                            allowed_names=_allowed,
                         )
                         if _ch_mcp_tools:
                             _existing = {t.spec.name for t in _channel_tools}
@@ -524,6 +561,19 @@ def serve(
             agent_manager = AgentManager(db_path=am_db, clear_stale_running=True)
         except Exception as exc:
             logger.debug("Agent manager init failed: %s", exc)
+
+    # Seed SC_Assist — the company-wide assistant is the default managed
+    # agent, auto-selected by the frontend on load. Idempotent.
+    if agent_manager is not None:
+        try:
+            if not any(
+                a.get("name") == "SC_Assist"
+                for a in agent_manager.list_agents()
+            ):
+                agent_manager.create_from_template("sc_assist", "SC_Assist")
+                console.print("  SC_Assist:  [cyan]created[/cyan]")
+        except Exception as exc:
+            logger.debug("SC_Assist seeding failed: %s", exc)
 
     # Set up agent scheduler for cron/interval agents
     agent_scheduler = None

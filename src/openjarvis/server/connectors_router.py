@@ -167,17 +167,31 @@ def create_connectors_router():
         # Only the client-registration pair routes through the server flow.
         # A raw access token (no ".apps.googleusercontent.com") is handled by
         # the connector's handle_callback unchanged.
-        if ".apps.googleusercontent.com" not in raw or ":" not in raw:
+        is_google_pair = ".apps.googleusercontent.com" in raw and ":" in raw
+        # The connect form sets ``token = email:password`` whenever both
+        # input fields are filled; for non-Google providers (e.g. Microsoft
+        # GUID client IDs) that pair is the app registration, so accept the
+        # field pair directly. Only when the connector actually has an OAuth
+        # provider — ``auth_type == "oauth"`` connectors like gmail_imap /
+        # outlook take an app password in the same fields and must fall
+        # through to handle_callback unchanged.
+        is_field_pair = bool(req.email and req.password)
+        if not is_google_pair and not is_field_pair:
             return None
 
         provider = get_provider_for_connector(connector_id)
         if provider is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"No OAuth provider configured for '{connector_id}'",
-            )
+            if is_google_pair:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No OAuth provider configured for '{connector_id}'",
+                )
+            return None
 
-        client_id, client_secret = raw.split(":", 1)
+        pair_source = (
+            f"{req.email}:{req.password}" if is_field_pair else raw
+        )
+        client_id, client_secret = pair_source.split(":", 1)
         client_id = client_id.strip()
         client_secret = client_secret.strip()
         if not client_id or not client_secret:
@@ -476,7 +490,9 @@ def create_connectors_router():
         }
 
     @router.get("/{connector_id}/oauth/start")
-    async def oauth_start(connector_id: str, request: Request):
+    async def oauth_start(
+        connector_id: str, request: Request, user: str = ""
+    ):
         """Redirect to the OAuth provider's consent page.
 
         The callback will come back to /v1/connectors/{id}/oauth/callback.
@@ -486,6 +502,7 @@ def create_connectors_router():
         from openjarvis.connectors.oauth import (
             get_client_credentials,
             get_provider_for_connector,
+            provider_endpoint,
         )
 
         _ensure_connectors_registered()
@@ -516,7 +533,12 @@ def create_connectors_router():
             "scope": " ".join(provider.scopes),
             **provider.extra_auth_params,
         }
-        auth_url = f"{provider.auth_endpoint}?{urlencode(params)}"
+        # Per-user grants: the caller's user id rides the OAuth ``state``
+        # param so /oauth/callback can file the tokens under that user
+        # instead of the shared connector credential file.
+        if user:
+            params["state"] = user
+        auth_url = f"{provider_endpoint(provider.auth_endpoint)}?{urlencode(params)}"
 
         from fastapi.responses import RedirectResponse
 
@@ -528,6 +550,7 @@ def create_connectors_router():
         request: Request,
         code: str = "",
         error: str = "",
+        state: str = "",
     ):
         """Handle OAuth callback from the provider."""
         from fastapi.responses import HTMLResponse
@@ -595,8 +618,16 @@ def create_connectors_router():
             "client_secret": client_secret,
         }
 
-        for filename in provider.credential_files:
-            save_tokens(str(_CONNECTORS_DIR / filename), payload)
+        if state and provider.name == "microsoft":
+            # Per-user grant: file the tokens under ms365-<user>.json so the
+            # signer's account is used only for their own tool calls. The
+            # shared connector file is intentionally left untouched.
+            from openjarvis.connectors.ms365 import credentials_path_for_user
+
+            save_tokens(credentials_path_for_user(state), payload)
+        else:
+            for filename in provider.credential_files:
+                save_tokens(str(_CONNECTORS_DIR / filename), payload)
 
         # Clear cached instance so it picks up new credentials
         _instances.pop(connector_id, None)

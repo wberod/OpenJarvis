@@ -1,4 +1,4 @@
-import type { ModelInfo, SavingsData, ServerInfo } from '../types';
+import type { DocumentAttachment, ModelInfo, SavingsData, ServerInfo } from '../types';
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from './supabase';
 
 // ---------------------------------------------------------------------------
@@ -251,6 +251,65 @@ export async function fetchServerInfo(): Promise<ServerInfo> {
   return res.json();
 }
 
+export interface AgentRunRequest {
+  model?: string;
+  messages: Array<{ role: string; content: string; images?: string[]; documents?: DocumentAttachment[] }>;
+  temperature?: number;
+  max_tokens?: number;
+  agent_id?: string;
+  /** Stable per-browser identity for user-scoped tools (e.g. ms365_*). */
+  user_id?: string;
+}
+
+const USER_ID_KEY = 'openjarvis-user-id';
+const USER_EMAIL_KEY = 'openjarvis-email';
+
+/** Caller identity for user-scoped tools: the signed-in user's email when
+ *  known (set by the hub sign-in or Settings), else a stable per-browser
+ *  UUID generated once and persisted. */
+export function getUserId(): string {
+  try {
+    const email = localStorage.getItem(USER_EMAIL_KEY);
+    if (email) return email;
+    let id = localStorage.getItem(USER_ID_KEY);
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem(USER_ID_KEY, id);
+    }
+    return id;
+  } catch {
+    return '';
+  }
+}
+
+export interface AgentRunResponse {
+  content: string;
+  tool_results: Array<{
+    tool_name: string;
+    content: string;
+    success: boolean;
+    arguments: Record<string, unknown>;
+  }>;
+  turns: number;
+  model: string;
+  metadata: Record<string, unknown>;
+}
+
+export async function runAgentChat(
+  request: AgentRunRequest,
+): Promise<AgentRunResponse> {
+  const res = await apiFetch(`/v1/agent/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => res.statusText);
+    throw new Error(`Agent run failed: ${detail}`);
+  }
+  return res.json();
+}
+
 export async function checkHealth(): Promise<boolean> {
   if (isTauri()) {
     try {
@@ -328,6 +387,7 @@ export interface TranscriptionResult {
 
 export interface SpeechHealth {
   available: boolean;
+  enabled?: boolean;
   backend?: string;
   reason?: string;
 }
@@ -375,6 +435,75 @@ export async function fetchSpeechHealth(): Promise<SpeechHealth> {
   const res = await apiFetch(`/v1/speech/health`);
   if (!res.ok) return { available: false };
   return res.json();
+}
+
+export type WakeState = 'disabled' | 'starting' | 'armed' | 'capturing' | 'transcribing' | 'command_ready' | 'follow_up' | 'error';
+
+export interface WakeStatus {
+  state: WakeState;
+  supported: boolean;
+  enabled: boolean;
+  model_installed: boolean;
+  model_version?: string;
+  detector_mode?: 'local' | 'browser';
+  phrase?: string;
+  error?: string | null;
+  follow_up_until?: number | null;
+}
+
+export interface WakeEvent {
+  type: 'state_changed' | 'wake_detected' | 'capture_started' | 'transcribing' | 'command_ready' | 'error';
+  state?: WakeState;
+  transcript?: string;
+  error?: string;
+  timestamp?: number;
+}
+
+export async function fetchWakeStatus(): Promise<WakeStatus> {
+  const res = await apiFetch('/v1/speech/wake/status');
+  if (!res.ok) throw new Error(`Wake status failed: ${res.status}`);
+  return res.json();
+}
+
+export async function setWakeListening(enabled: boolean): Promise<WakeStatus> {
+  const res = await apiFetch(`/v1/speech/wake/${enabled ? 'start' : 'stop'}`, { method: 'POST' });
+  if (!res.ok) throw new Error(`Wake listening update failed: ${res.status}`);
+  return res.json();
+}
+
+export async function updateWakeSettings(settings: Record<string, boolean | number | string>): Promise<WakeStatus> {
+  const res = await apiFetch('/v1/speech/wake/settings', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+  });
+  if (!res.ok) throw new Error(`Wake settings update failed: ${res.status}`);
+  return res.json();
+}
+
+export async function enterWakeFollowUp(): Promise<WakeStatus> {
+  const res = await apiFetch('/v1/speech/wake/follow-up', { method: 'POST' });
+  if (!res.ok) throw new Error(`Wake follow-up failed: ${res.status}`);
+  return res.json();
+}
+
+export async function installWakeModel(consent: boolean): Promise<WakeStatus> {
+  const res = await apiFetch('/v1/speech/wake/model', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ consent }),
+  });
+  if (!res.ok) throw new Error(`Wake model installation failed: ${res.status}`);
+  return res.json();
+}
+
+export function wakeEventsUrl(): string {
+  const base = getBase() || window.location.origin;
+  const url = new URL('/v1/speech/wake/events', base);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  const key = getApiKey();
+  if (key) url.searchParams.set('token', key);
+  return url.toString();
 }
 
 // ---------------------------------------------------------------------------

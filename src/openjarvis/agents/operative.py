@@ -249,7 +249,8 @@ class OperativeAgent(ToolUsingAgent):
         # Context conversation (e.g. memory injection)
         if context and context.conversation.messages:
             messages.extend(context.conversation.messages)
-        messages.append(Message(role=Role.USER, content=input))
+        final_images = context.metadata.get("images") if context and context.metadata else None
+        messages.append(Message(role=Role.USER, content=input, images=final_images))
         return messages
 
     def _recall_state(self) -> str:

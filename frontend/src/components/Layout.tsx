@@ -3,6 +3,7 @@ import { Outlet, useNavigate } from 'react-router';
 import { ApprovalBell } from './ApprovalBell';
 import { Sidebar } from './Sidebar/Sidebar';
 import { SystemPulse } from './SystemPulse';
+import { WakeWordIndicator } from './WakeWordIndicator';
 import { useAppStore } from '../lib/store';
 import { checkHealth } from '../lib/api';
 
@@ -28,6 +29,7 @@ export function Layout() {
     <div className="flex flex-col h-full w-full overflow-hidden relative" style={{ paddingTop: '3px' }}>
       <div className="hud-backdrop" aria-hidden="true" />
       <SystemPulse apiReachable={apiReachable} />
+      <WakeWordIndicator />
       <ApprovalBell />
 
       {/* Health check banner */}

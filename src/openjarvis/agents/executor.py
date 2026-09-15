@@ -83,6 +83,12 @@ class AgentExecutor:
         elif name.startswith("channel_"):
             if hasattr(tool, "_channel"):
                 tool._channel = getattr(self._system, "channel_backend", None)
+        elif name.startswith("agent_"):
+            # Agent lifecycle tools (agent_spawn/agent_send/agent_list/…)
+            # get the real AgentManager so they operate on persistent
+            # managed agents instead of the in-memory stub registry.
+            if hasattr(tool, "_manager"):
+                tool._manager = self._manager
 
     def run_ephemeral(
         self,
@@ -323,6 +329,10 @@ class AgentExecutor:
                         tool_cls = ToolRegistry.get(tname)
                         tool = tool_cls()
                         self._inject_tool_deps(tool)
+                        # User-scoped tools (ms365_*) resolve per-user
+                        # credentials from config["user_id"].
+                        if hasattr(tool, "_user"):
+                            tool._user = config.get("user_id")
                         tool_instances.append(tool)
                     except Exception:
                         logger.warning("Failed to instantiate tool %s", tname)
@@ -344,7 +354,21 @@ class AgentExecutor:
                     if pooled is not None:
                         tool_instances.append(pooled)
 
-            if tool_instances:
+        # ``include_mcp_tools`` grants the agent every tool discovered from
+        # the configured MCP servers (e.g. Box, Microsoft 365 MCP) without
+        # having to name each one in ``config["tools"]``.
+        if config.get("include_mcp_tools") and (
+            self._system is not None
+            and getattr(self._system, "tool_executor", None) is not None
+        ):
+            mcp_pool = getattr(self._system.tool_executor, "_tools", {}) or {}
+            existing = {t.spec.name for t in tool_instances}
+            for tname, pooled in mcp_pool.items():
+                if tname not in existing:
+                    tool_instances.append(pooled)
+                    existing.add(tname)
+
+        if tool_instances:
                 logger.info(
                     "Agent %s: resolved %d/%d tools",
                     agent["name"],
@@ -372,6 +396,14 @@ class AgentExecutor:
         if getattr(self, "_confirm_callback", None) is not None:
             agent_kwargs["interactive"] = True
             agent_kwargs["confirm_callback"] = self._confirm_callback
+        # Propagate runtime parameters from the managed agent config.  Without
+        # this the chat request's model/temperature/max_tokens are ignored.
+        if config.get("temperature") is not None:
+            agent_kwargs["temperature"] = config["temperature"]
+        if config.get("max_tokens") is not None:
+            agent_kwargs["max_tokens"] = config["max_tokens"]
+        if config.get("max_turns") is not None:
+            agent_kwargs["max_turns"] = config["max_turns"]
 
         # Wire cross-tick state plumbing into agent classes that accept it.
         # Without this, MonitorOperative/Operative agents have no working
@@ -407,9 +439,16 @@ class AgentExecutor:
             if cfg is not None and _accepts("prompt_builder"):
                 from openjarvis.prompt.builder import SystemPromptBuilder
 
+                # Use the managed agent's own system_prompt if one was prepared,
+                # otherwise fall back to the global default agent prompt. This keeps
+                # per-agent instructions (and the chat-mode suffix) in the system
+                # message instead of dropping them when a prompt builder is wired.
                 state_kwargs["prompt_builder"] = SystemPromptBuilder(
-                    agent_template=getattr(cfg.agent, "default_system_prompt", "")
-                    or "",
+                    agent_template=(
+                        config.get("system_prompt")
+                        or getattr(cfg.agent, "default_system_prompt", "")
+                        or ""
+                    ),
                     memory_files_config=cfg.memory_files,
                     system_prompt_config=cfg.system_prompt,
                 )
@@ -445,58 +484,75 @@ class AgentExecutor:
         # own prior output verbatim. Cross-tick continuity now lives in the
         # agent's session_store / memory_backend; here we only surface a
         # short tick-boundary marker so the model knows time has passed.
+        from openjarvis.agents._stubs import AgentContext
+        agent_ctx = AgentContext()
+
         import datetime
         import re
 
         today = datetime.date.today().strftime("%A, %B %d, %Y")
-        instruction = config.get("instruction", "")
-        memory = (agent.get("summary_memory") or "").strip()
-        last_run_at = agent.get("last_run_at")
 
-        tick_note = ""
-        if memory:
-            first_sentence = re.split(r"(?<=[.!?])\s+", memory, maxsplit=1)[0]
-            first_sentence = first_sentence.strip()[:200]
-            if last_run_at:
-                ts = datetime.datetime.fromtimestamp(last_run_at).strftime(
-                    "%Y-%m-%d %H:%M"
-                )
-                tick_note = f"Last tick at {ts}: {first_sentence}"
+        if "chat_input" in agent:
+            input_text = agent["chat_input"]
+            chat_conversation = agent.get("chat_conversation") or []
+            if chat_conversation:
+                agent_ctx.conversation.messages = list(chat_conversation)
+            chat_images = agent.get("chat_images")
+            if chat_images:
+                agent_ctx.metadata["images"] = list(chat_images)
+            logger.info(
+                "Agent %s: chat run with %d prior messages",
+                agent["name"],
+                len(chat_conversation),
+            )
+        else:
+            instruction = config.get("instruction", "")
+            memory = (agent.get("summary_memory") or "").strip()
+            last_run_at = agent.get("last_run_at")
+
+            tick_note = ""
+            if memory:
+                first_sentence = re.split(r"(?<=[.!?])\s+", memory, maxsplit=1)[0]
+                first_sentence = first_sentence.strip()[:200]
+                if last_run_at:
+                    ts = datetime.datetime.fromtimestamp(last_run_at).strftime(
+                        "%Y-%m-%d %H:%M"
+                    )
+                    tick_note = f"Last tick at {ts}: {first_sentence}"
+                else:
+                    tick_note = f"Previous tick: {first_sentence}"
+
+            if instruction:
+                input_text = f"Current date: {today}\n\nStanding instruction: {instruction}"
+                if tick_note:
+                    input_text += f"\n\n{tick_note}"
             else:
-                tick_note = f"Previous tick: {first_sentence}"
+                input_text = f"Current date: {today}"
+                if tick_note:
+                    input_text += f"\n\n{tick_note}"
+            pending = self._manager.get_pending_messages(agent["id"])
+            if pending:
+                user_msgs = "\n".join(f"User: {m['content']}" for m in pending)
+                input_text = f"{input_text}\n\nNew instructions:\n{user_msgs}"
+                for m in pending:
+                    self._manager.mark_message_delivered(m["id"])
+                logger.info(
+                    "Agent %s: delivering %d pending message(s)",
+                    agent["name"],
+                    len(pending),
+                )
+                self._set_activity(
+                    agent["id"],
+                    f"Delivering {len(pending)} message(s)...",
+                )
+            else:
+                if not instruction:
+                    input_text += "\n\nContinue your assigned task."
+                logger.info(
+                    "Agent %s: no pending messages, running with instruction only",
+                    agent["name"],
+                )
 
-        if instruction:
-            input_text = f"Current date: {today}\n\nStanding instruction: {instruction}"
-            if tick_note:
-                input_text += f"\n\n{tick_note}"
-        else:
-            base = tick_note or "Continue your assigned task."
-            input_text = f"Current date: {today}\n\n{base}"
-        pending = self._manager.get_pending_messages(agent["id"])
-        if pending:
-            user_msgs = "\n".join(f"User: {m['content']}" for m in pending)
-            input_text = f"{input_text}\n\nNew instructions:\n{user_msgs}"
-            for m in pending:
-                self._manager.mark_message_delivered(m["id"])
-            logger.info(
-                "Agent %s: delivering %d pending message(s)",
-                agent["name"],
-                len(pending),
-            )
-            self._set_activity(
-                agent["id"],
-                f"Delivering {len(pending)} message(s)...",
-            )
-        else:
-            logger.info(
-                "Agent %s: no pending messages, running with instruction only",
-                agent["name"],
-            )
-
-        # Build AgentContext with memory results from FTS5 backend
-        from openjarvis.agents._stubs import AgentContext
-
-        agent_ctx = AgentContext()
         memory_results = []
 
         if (
@@ -544,6 +600,28 @@ class AgentExecutor:
                 pass  # Don't break agent tick if memory retrieval fails
 
         agent_ctx.memory_results = memory_results
+
+        # If this agent has calendar tools and the input looks like a calendar
+        # creation request, append a final instruction that nudges the model to
+        # emit the tool call rather than a plain-text acknowledgement.
+        if tool_names and any(t in {"create_calendar_event", "create_multiple_calendar_events"} for t in tool_names):
+            if re.search(
+                r"\b(?:create|add|schedule|remind|set|make)\b.*\b(?:calendar|event|reminder|meal|breakfast|lunch|dinner|snack|appointment)\b",
+                input_text,
+                re.IGNORECASE,
+            ) or re.search(
+                r"\b(?:calendar|event|reminder|meal|breakfast|lunch|dinner|snack|appointment)\b.*\b(?:create|add|schedule|remind|set|make)\b",
+                input_text,
+                re.IGNORECASE,
+            ):
+                input_text += (
+                    "\n\nCRITICAL: If this request involves creating calendar events "
+                    "or reminders, call the create_multiple_calendar_events tool "
+                    "(or create_calendar_event for a single event) immediately. "
+                    "Do not reply with a confirmation; only reply after the tool "
+                    "has returned success."
+                )
+
         self._set_activity(agent["id"], "Generating response...")
         logger.info(
             "Agent %s: calling agent.run() with %d chars input",

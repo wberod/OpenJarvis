@@ -1,14 +1,15 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Send, Square, Paperclip, Search } from 'lucide-react';
+import { Send, Square, Paperclip, Search, Bot, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore, generateId } from '../../lib/store';
 import { streamChat, streamResearch } from '../../lib/sse';
-import { fetchSavings, getBase } from '../../lib/api';
+import { fetchSavings, getBase, runAgentChat, setWakeListening, fetchManagedAgents, getUserId } from '../../lib/api';
 import { listConnectors, getSyncStatus } from '../../lib/connectors-api';
 import { MicButton } from './MicButton';
 import { useSpeech } from '../../hooks/useSpeech';
 import type {
   ChatMessage,
+  DocumentAttachment,
   MessageTelemetry,
   ResearchSearchTrace,
   ResearchSource,
@@ -76,15 +77,30 @@ function useResearchCorpusSync(enabled: boolean): {
 
 export function InputArea() {
   const [input, setInput] = useState('');
+  const [attachedImages, setAttachedImages] = useState<string[]>([]);
+  const [attachedDocs, setAttachedDocs] = useState<DocumentAttachment[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sendMessageRef = useRef<(text?: string) => Promise<void>>(async () => {});
+
+  const stripDataUrl = (url: string) =>
+    url.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '');
+  const stripPdfDataUrl = (url: string) =>
+    url.replace(/^data:application\/pdf;base64,/, '');
 
   const activeId = useAppStore((s) => s.activeId);
   const selectedModel = useAppStore((s) => s.selectedModel);
+  const models = useAppStore((s) => s.models);
+  const setSelectedModel = useAppStore((s) => s.setSelectedModel);
   const streamState = useAppStore((s) => s.streamState);
   const messages = useAppStore((s) => s.messages);
   const speechEnabled = useAppStore((s) => s.settings.speechEnabled);
+  const wakeEnabled = useAppStore((s) => s.settings.wakeEnabled);
+  const pendingVoiceCommand = useAppStore((s) => s.pendingVoiceCommand);
+  const clearVoiceCommand = useAppStore((s) => s.clearVoiceCommand);
+  const voicePlaybackState = useAppStore((s) => s.voicePlaybackState);
   const maxTokens = useAppStore((s) => s.settings.maxTokens);
   const temperature = useAppStore((s) => s.settings.temperature);
   const createConversation = useAppStore((s) => s.createConversation);
@@ -95,13 +111,19 @@ export function InputArea() {
   const modelLoading = useAppStore((s) => s.modelLoading);
   const deepResearch = useAppStore((s) => s.deepResearch);
   const setDeepResearch = useAppStore((s) => s.setDeepResearch);
+  const managedAgents = useAppStore((s) => s.managedAgents);
+  const setManagedAgents = useAppStore((s) => s.setManagedAgents);
+  const selectedAgentId = useAppStore((s) => s.selectedAgentId);
+  const setSelectedAgentId = useAppStore((s) => s.setSelectedAgentId);
   const corpusSync = useResearchCorpusSync(deepResearch);
+
+  const selectedAgent = managedAgents.find((a) => a.id === selectedAgentId);
 
   const {
     state: speechState,
     error: speechError,
     available: speechAvailable,
-    startRecording,
+    startHandsFree,
     stopRecording,
   } = useSpeech();
 
@@ -134,6 +156,29 @@ export function InputArea() {
     }
   }, [speechError]);
 
+  // Auto-select the first available model if none is picked so voice/wake
+  // inputs can work without manually opening the model picker.
+  useEffect(() => {
+    if (!selectedModel && models.length > 0 && !modelLoading) {
+      const defaultModel = models[0].id;
+      if (defaultModel) {
+        setSelectedModel(defaultModel);
+      }
+    }
+  }, [selectedModel, models, modelLoading, setSelectedModel]);
+
+  // Load managed agents so the chat can route to a selected one.
+  useEffect(() => {
+    if (managedAgents.length > 0) return;
+    let cancelled = false;
+    fetchManagedAgents()
+      .then((agents) => {
+        if (!cancelled) setManagedAgents(agents);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [managedAgents, setManagedAgents]);
+
   const handleMicClick = useCallback(async () => {
     if (speechState === 'recording') {
       try {
@@ -143,11 +188,19 @@ export function InputArea() {
         }
       } catch {
         // Error is captured in useSpeech
+      } finally {
+        if (wakeEnabled) void setWakeListening(true).catch(() => {});
       }
     } else {
-      await startRecording();
+      if (wakeEnabled) await setWakeListening(false).catch(() => null);
+      await startHandsFree((text) => {
+        if (wakeEnabled) void setWakeListening(true).catch(() => {});
+        if (text) {
+          sendMessageRef.current(text);
+        }
+      });
     }
-  }, [speechState, startRecording, stopRecording]);
+  }, [speechState, startHandsFree, stopRecording, wakeEnabled]);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -165,15 +218,26 @@ export function InputArea() {
     resetStream();
   }, [resetStream]);
 
-  const sendMessage = useCallback(async () => {
-    const content = input.trim();
-    if (!content || streamState.isStreaming) return;
-    if (!selectedModel) {
+  const sendMessage = useCallback(async (overrideContent?: string) => {
+    const content = (overrideContent ?? input).trim();
+    const pendingImages = [...attachedImages];
+    const pendingDocs = [...attachedDocs];
+    const activeAgentId = selectedAgentId;
+    // eslint-disable-next-line no-console
+    console.log('[InputArea] sendMessage', { content, selectedModel, streamState: streamState.isStreaming });
+    if ((!content && pendingImages.length === 0 && pendingDocs.length === 0) || streamState.isStreaming) return;
+    // Managed agents supply their own model from config, so a model pick is
+    // only required for raw chat.
+    if (!selectedModel && !activeAgentId) {
       toast.error('Pick a model first (⌘K)');
       return;
     }
 
+    const requestModel = pendingImages.length > 0 ? 'qwen2.5vl:3b' : selectedModel;
+
     setInput('');
+    setAttachedImages([]);
+    setAttachedDocs([]);
 
     let convId = activeId;
     if (!convId) {
@@ -185,6 +249,8 @@ export function InputArea() {
       role: 'user',
       content,
       timestamp: Date.now(),
+      images: pendingImages.map(stripDataUrl),
+      documents: pendingDocs,
     };
     addMessage(convId, userMsg);
 
@@ -193,6 +259,8 @@ export function InputArea() {
     const apiMessages = currentMessages.map((m) => ({
       role: m.role,
       content: m.content,
+      images: m.images,
+      documents: m.documents,
     }));
 
     const assistantMsg: ChatMessage = {
@@ -238,14 +306,39 @@ export function InputArea() {
       category: 'chat',
       message: deepResearch
         ? `Research: "${content.slice(0, 80)}${content.length > 80 ? '...' : ''}"`
-        : `Request: "${content.slice(0, 80)}${content.length > 80 ? '...' : ''}" → ${selectedModel}`,
+        : `Request: "${content.slice(0, 80)}${content.length > 80 ? '...' : ''}" → ${requestModel}`,
     });
 
+    const isAgentRun = !!activeAgentId;
+
     try {
-      if (deepResearch) {
+      if (isAgentRun) {
+        setStreamState({ phase: 'Acting...' });
+        const result = await runAgentChat({
+          model: requestModel,
+          messages: apiMessages,
+          temperature,
+          max_tokens: maxTokens,
+          agent_id: activeAgentId,
+          user_id: getUserId(),
+        });
+        accumulatedContent = result.content || '';
+        for (const tr of result.tool_results) {
+          toolCalls.push({
+            id: generateId(),
+            tool: tr.tool_name,
+            arguments:
+              typeof tr.arguments === 'string'
+                ? tr.arguments
+                : JSON.stringify(tr.arguments || {}),
+            status: tr.success ? 'success' : 'error',
+            result: tr.content,
+          });
+        }
+      } else if (deepResearch) {
         for await (const ev of streamResearch(
           content,
-          selectedModel,
+          requestModel,
           controller.signal,
         )) {
           if (ev.type === 'search_call') {
@@ -368,7 +461,7 @@ export function InputArea() {
         }
       } else {
       for await (const sseEvent of streamChat(
-        { model: selectedModel, messages: apiMessages, stream: true, temperature, max_tokens: maxTokens },
+        { model: requestModel, messages: apiMessages, stream: true, temperature, max_tokens: maxTokens },
         controller.signal,
       )) {
         const eventName = sseEvent.event;
@@ -379,7 +472,7 @@ export function InputArea() {
           setStreamState({ phase: 'Generating...' });
           useAppStore.getState().addLogEntry({
             timestamp: Date.now(), level: 'info', category: 'chat',
-            message: `Generating with ${selectedModel}...`,
+            message: `Generating with ${requestModel}...`,
           });
         } else if (eventName === 'tool_call_start') {
           try {
@@ -466,10 +559,10 @@ export function InputArea() {
       }
       const totalMs = Date.now() - startTime;
       const _CLOUD_PREFIXES = ['gpt-', 'o1-', 'o3-', 'o4-', 'claude-', 'gemini-', 'openrouter/', 'MiniMax-', 'chatgpt-'];
-      const engineLabel = _CLOUD_PREFIXES.some(p => selectedModel.startsWith(p)) ? 'cloud' : 'ollama';
+      const engineLabel = _CLOUD_PREFIXES.some(p => requestModel.startsWith(p)) ? 'cloud' : 'ollama';
       const telemetry: MessageTelemetry = {
         engine: engineLabel,
-        model_id: selectedModel,
+        model_id: requestModel,
         total_ms: totalMs,
         ttft_ms: ttftMs,
         tokens_per_sec: usage?.completion_tokens
@@ -481,16 +574,18 @@ export function InputArea() {
       };
       // Check if the response has digest audio available
       let audioMeta: { url: string } | undefined;
-      try {
-        const digestRes = await fetch(`${getBase()}/api/digest`);
-        if (digestRes.ok) {
-          const digest = await digestRes.json();
-          if (digest.audio_available) {
-            audioMeta = { url: `${getBase()}/api/digest/audio` };
+      if (toolCalls.some((call) => call.tool === 'digest_collect')) {
+        try {
+          const digestRes = await fetch(`${getBase()}/api/digest`);
+          if (digestRes.ok) {
+            const digest = await digestRes.json();
+            if (digest.audio_available) {
+              audioMeta = { url: `${getBase()}/api/digest/audio` };
+            }
           }
+        } catch {
+          // Not a digest response or server unavailable — skip
         }
-      } catch {
-        // Not a digest response or server unavailable — skip
       }
 
       updateLastAssistant(
@@ -526,8 +621,11 @@ export function InputArea() {
     }
   }, [
     input,
+    attachedImages,
+    attachedDocs,
     activeId,
     selectedModel,
+    selectedAgentId,
     streamState.isStreaming,
     createConversation,
     addMessage,
@@ -537,14 +635,117 @@ export function InputArea() {
     deepResearch,
     temperature,
     maxTokens,
+    runAgentChat,
   ]);
+
+  useEffect(() => {
+    sendMessageRef.current = sendMessage;
+  }, [sendMessage]);
+
+  useEffect(() => {
+    // eslint-disable-next-line no-console
+    console.log('[InputArea] pendingVoiceCommand effect', { pendingVoiceCommand, streamState: streamState.isStreaming, voicePlaybackState, selectedModel });
+    const activeAgentId = selectedAgentId;
+    if (!pendingVoiceCommand || streamState.isStreaming || voicePlaybackState !== 'idle' || (!selectedModel && !activeAgentId)) {
+      if (pendingVoiceCommand && !selectedModel && !activeAgentId) {
+        toast.error('Pick a model first (⌘K)');
+      }
+      return;
+    }
+    const command = pendingVoiceCommand;
+    clearVoiceCommand();
+    // eslint-disable-next-line no-console
+    console.log('[InputArea] sending voice command:', command);
+    void sendMessage(command);
+  }, [pendingVoiceCommand, streamState.isStreaming, voicePlaybackState, selectedModel, selectedAgentId, clearVoiceCommand, sendMessage]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      sendMessage();
+      sendMessage(input);
     }
   };
+
+  const readFileText = (file: File) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsText(file);
+    });
+
+  const readFileDataUrl = (file: File) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+  const handleFileChange = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files;
+      if (!files || files.length === 0) return;
+
+      const textSuffixes = new Set([
+        '.txt',
+        '.md',
+        '.csv',
+        '.json',
+        '.js',
+        '.ts',
+        '.py',
+        '.html',
+        '.xml',
+        '.yaml',
+        '.yml',
+      ]);
+      const isText = (f: File) =>
+        f.type.startsWith('text/') ||
+        f.type === 'application/json' ||
+        f.type === 'application/x-yaml' ||
+        textSuffixes.has(f.name.slice(f.name.lastIndexOf('.')).toLowerCase());
+
+      const newImages: string[] = [];
+      const newDocs: DocumentAttachment[] = [];
+
+      for (const file of Array.from(files)) {
+        try {
+          if (file.type.startsWith('image/')) {
+            const dataUrl = await readFileDataUrl(file);
+            newImages.push(dataUrl);
+          } else if (isText(file)) {
+            const text = await readFileText(file);
+            newDocs.push({ name: file.name, mime: file.type || 'text/plain', content: text });
+          } else if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+            const dataUrl = await readFileDataUrl(file);
+            newDocs.push({
+              name: file.name,
+              mime: 'application/pdf',
+              content: stripPdfDataUrl(dataUrl),
+            });
+          } else {
+            toast.error(`Unsupported file type: ${file.name}`);
+          }
+        } catch {
+          toast.error(`Failed to read ${file.name}.`);
+        }
+      }
+
+      setAttachedImages((prev) => [...prev, ...newImages].slice(0, 3));
+      setAttachedDocs((prev) => [...prev, ...newDocs].slice(0, 3));
+      e.target.value = '';
+    },
+    [],
+  );
+
+  const removeImage = useCallback((idx: number) => {
+    setAttachedImages((prev) => prev.filter((_, i) => i !== idx));
+  }, []);
+
+  const removeDoc = useCallback((idx: number) => {
+    setAttachedDocs((prev) => prev.filter((_, i) => i !== idx));
+  }, []);
 
   return (
     <div className="px-4 pb-4 pt-2" style={{ maxWidth: 'var(--chat-max-width)', margin: '0 auto', width: '100%' }}>
@@ -580,6 +781,51 @@ export function InputArea() {
           </div>
         )}
       </div>
+      {attachedImages.length > 0 && (
+        <div className="flex gap-2 mb-2">
+          {attachedImages.map((url, idx) => (
+            <div key={idx} className="relative">
+              <img
+                src={url}
+                alt="attached"
+                className="h-16 w-16 object-cover rounded-lg border"
+                style={{ borderColor: 'var(--color-border)' }}
+              />
+              <button
+                type="button"
+                onClick={() => removeImage(idx)}
+                className="absolute -top-1 -right-1 p-0.5 rounded-full bg-black/50 text-white"
+                title="Remove image"
+              >
+                <X size={10} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {attachedDocs.length > 0 && (
+        <div className="flex flex-wrap gap-2 mb-2">
+          {attachedDocs.map((doc, idx) => (
+            <div
+              key={idx}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs"
+              style={{ background: 'var(--color-bg-tertiary)', border: '1px solid var(--color-border)' }}
+            >
+              <span className="truncate max-w-[160px]" style={{ color: 'var(--color-text-secondary)' }}>
+                {doc.name}
+              </span>
+              <button
+                type="button"
+                onClick={() => removeDoc(idx)}
+                className="p-0.5 rounded hover:opacity-70"
+                title="Remove document"
+              >
+                <X size={12} style={{ color: 'var(--color-text-tertiary)' }} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       <div
         className="flex items-center gap-2 rounded-2xl px-4 py-3 transition-shadow"
         style={{
@@ -588,12 +834,40 @@ export function InputArea() {
           boxShadow: 'var(--shadow-sm)',
         }}
       >
+        <input
+          type="file"
+          accept="image/*,.pdf,.txt,.md,.csv,.json,.js,.ts,.py,.html,.xml,.yaml,.yml"
+          multiple
+          ref={fileInputRef}
+          onChange={handleFileChange}
+          className="hidden"
+        />
+        {selectedAgent && (
+          <div
+            className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs shrink-0"
+            style={{
+              background: 'var(--color-accent)' + '20',
+              color: 'var(--color-accent)',
+            }}
+          >
+            <Bot size={12} />
+            <span className="max-w-[120px] truncate">{selectedAgent.name}</span>
+            <button
+              type="button"
+              onClick={() => setSelectedAgentId(null)}
+              className="p-0.5 rounded hover:opacity-70"
+              title="Switch back to default assistant"
+            >
+              <X size={12} />
+            </button>
+          </div>
+        )}
         <textarea
           ref={textareaRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={selectedModel ? 'Message OpenJarvis...' : 'Pick a model first (⌘K)...'}
+          placeholder={selectedModel ? (selectedAgent ? `Message ${selectedAgent.name}...` : 'Message OpenJarvis...') : 'Pick a model first (⌘K)...'}
           rows={1}
           className="flex-1 bg-transparent outline-none resize-none text-sm leading-relaxed"
           style={{ color: 'var(--color-text)', maxHeight: '200px' }}
@@ -610,6 +884,16 @@ export function InputArea() {
           </button>
         ) : (
           <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={streamState.isStreaming || modelLoading}
+              title="Attach file or image"
+              className="p-2 rounded-xl transition-all shrink-0 cursor-pointer disabled:opacity-30"
+              style={{ color: 'var(--color-text-secondary)' }}
+            >
+              <Paperclip size={18} />
+            </button>
             <MicButton
               state={speechState}
               onClick={handleMicClick}
@@ -617,13 +901,13 @@ export function InputArea() {
               reason={micReason}
             />
             <button
-              onClick={sendMessage}
-              disabled={!input.trim() || modelLoading || !selectedModel}
+              onClick={() => { void sendMessage(); }}
+              disabled={(!input.trim() && attachedImages.length === 0 && attachedDocs.length === 0) || modelLoading || !selectedModel}
               title={selectedModel ? 'Send message' : 'Pick a model first (⌘K)'}
               className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default"
               style={{
-                background: input.trim() ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
-                color: input.trim() ? 'white' : 'var(--color-text-tertiary)',
+                background: (input.trim() || attachedImages.length > 0 || attachedDocs.length > 0) ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
+                color: (input.trim() || attachedImages.length > 0 || attachedDocs.length > 0) ? 'white' : 'var(--color-text-tertiary)',
               }}
             >
               <Send size={16} />

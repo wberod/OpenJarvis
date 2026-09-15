@@ -4,8 +4,10 @@ import { MessageBubble } from './MessageBubble';
 import { InputArea } from './InputArea';
 import { StreamingDots } from './StreamingDots';
 import { useAppStore } from '../../lib/store';
+import { useTTS } from '../../hooks/useTTS';
 import { Sparkles, PanelRightOpen, PanelRightClose, Database, MessageSquare, X } from 'lucide-react';
 import { listConnectors } from '../../lib/connectors-api';
+import { enterWakeFollowUp } from '../../lib/api';
 
 function getGreeting(): string {
   const hour = new Date().getHours();
@@ -38,6 +40,51 @@ export function ChatArea() {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
   }, [messages, streamState.content]);
+
+  const voiceEnabled = useAppStore((s) => s.settings.voiceEnabled);
+  const wakeConversationActive = useAppStore((s) => s.wakeConversationActive);
+  const voicePlaybackState = useAppStore((s) => s.voicePlaybackState);
+  const setWakeStatus = useAppStore((s) => s.setWakeStatus);
+  const { speak, stop } = useTTS();
+  const lastSpokenIdRef = useRef<string | null>(null);
+  const lastFollowUpIdRef = useRef<string | null>(null);
+  const spokeRef = useRef(false);
+
+  useEffect(() => {
+    if (!voiceEnabled) return;
+    if (streamState.isStreaming) {
+      stop();
+      return;
+    }
+    const last = messages[messages.length - 1];
+    if (
+      last &&
+      last.role === 'assistant' &&
+      last.id !== lastSpokenIdRef.current &&
+      last.content.trim()
+    ) {
+      lastSpokenIdRef.current = last.id;
+      speak(last.content);
+    }
+  }, [messages, streamState.isStreaming, voiceEnabled, speak, stop]);
+
+  useEffect(() => {
+    if (voicePlaybackState === 'speaking') {
+      spokeRef.current = true;
+      return;
+    }
+    if (voicePlaybackState !== 'idle' || !spokeRef.current || !wakeConversationActive) return;
+    spokeRef.current = false;
+    void enterWakeFollowUp().then(setWakeStatus).catch(() => {});
+  }, [voicePlaybackState, wakeConversationActive, setWakeStatus]);
+
+  useEffect(() => {
+    if (voiceEnabled || streamState.isStreaming || !wakeConversationActive) return;
+    const last = messages[messages.length - 1];
+    if (!last || last.role !== 'assistant' || !last.content.trim() || last.id === lastFollowUpIdRef.current) return;
+    lastFollowUpIdRef.current = last.id;
+    void enterWakeFollowUp().then(setWakeStatus).catch(() => {});
+  }, [messages, streamState.isStreaming, voiceEnabled, wakeConversationActive, setWakeStatus]);
 
   const handleScroll = () => {
     if (!listRef.current) return;

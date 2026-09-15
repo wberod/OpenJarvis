@@ -309,10 +309,34 @@ def _build_tools(
         elif name == "llm":
             tools.append(tool_cls(engine=engine, model=model_name))
         elif name == "file_read":
-            tools.append(tool_cls())
+            allowed = _get_filesystem_dirs(config, "allowed_read_dirs")
+            tools.append(tool_cls(allowed_dirs=allowed))
+        elif name == "file_write":
+            allowed = _get_filesystem_dirs(config, "allowed_write_dirs")
+            tools.append(tool_cls(allowed_dirs=allowed))
+        elif name == "open_app":
+            aliases = getattr(
+                getattr(config, "tools", None),
+                "open_app_aliases",
+                None,
+            )
+            tools.append(tool_cls(custom_aliases=aliases))
+        elif name == "llm":
+            tools.append(tool_cls(engine=engine, model=model_name))
         else:
             tools.append(tool_cls())
     return tools
+
+
+def _get_filesystem_dirs(config, key: str) -> list[str] | None:
+    """Return filesystem allowed directories from config, if present."""
+    tools_cfg = getattr(config, "tools", None)
+    if tools_cfg is None:
+        return None
+    fs_cfg = getattr(tools_cfg, "filesystem", None)
+    if fs_cfg is None:
+        return None
+    return getattr(fs_cfg, key, None)
 
 
 def _run_agent(

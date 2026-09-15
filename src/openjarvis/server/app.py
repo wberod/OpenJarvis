@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import pathlib
 import time
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -224,6 +225,18 @@ def create_app(
     app.state.memory_backend = memory_backend
     app.state.memory_service = memory_service
     app.state.speech_backend = speech_backend
+    try:
+        from openjarvis.core.config import load_config
+        from openjarvis.speech.wake_word import WakeWordService
+
+        wake_config = (config if config is not None else load_config()).speech.wake
+        app.state.wake_service = WakeWordService(
+            config=wake_config,
+            speech_backend=speech_backend,
+        )
+    except Exception as exc:
+        logger.debug("Wake service init skipped: %s", exc)
+        app.state.wake_service = None
     app.state.agent_manager = agent_manager
     app.state.agent_scheduler = agent_scheduler
     app.state.session_start = time.time()
@@ -306,6 +319,21 @@ def create_app(
                 except Exception:
                     pass
 
+    wake_service = getattr(app.state, "wake_service", None)
+    if wake_service is not None:
+        from openjarvis.server.wake_routes import create_wake_router
+
+        app.include_router(create_wake_router(wake_service))
+
+        @app.on_event("startup")
+        async def _start_wake_service() -> None:
+            if wake_service.config.enabled and wake_service.config.auto_start:
+                await asyncio.to_thread(wake_service.start)
+
+        @app.on_event("shutdown")
+        async def _stop_wake_service() -> None:
+            await asyncio.to_thread(wake_service.stop)
+
     app.include_router(router)
     app.include_router(dashboard_router)
     app.include_router(comparison_router)
@@ -367,9 +395,20 @@ def create_app(
                 name="static-assets",
             )
 
-        @app.get("/{full_path:path}")
-        async def spa_catch_all(full_path: str):
-            """Serve static files directly, fall back to index.html for SPA routes."""
+        @app.api_route("/{full_path:path}", methods=["GET", "HEAD", "POST"])
+        async def spa_catch_all(request: Request, full_path: str):
+            """Serve static files directly, fall back to index.html for SPA routes.
+
+            Accepts POST so that requests to missing API endpoints under ``v1/``
+            or ``api/`` return a clear 404 instead of a confusing 405 from the
+            GET-only fallback.
+            """
+            if full_path and (
+                full_path.startswith("v1/") or full_path.startswith("api/")
+            ):
+                raise HTTPException(status_code=404, detail=f"Not Found: /{full_path}")
+            if request.method == "POST":
+                raise HTTPException(status_code=405, detail="Method Not Allowed")
             if full_path:
                 candidate = (static_dir / full_path).resolve()
                 # Path traversal prevention

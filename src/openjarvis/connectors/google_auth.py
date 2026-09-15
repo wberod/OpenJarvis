@@ -31,6 +31,50 @@ class GoogleAuthError(RuntimeError):
     """Raised when Google credentials are missing or refresh-token grant fails."""
 
 
+def _raise_if_service_disabled(exc: httpx.HTTPStatusError) -> None:
+    """Re-raise *exc* as :class:`GoogleAuthError` when it's an API-disabled 403.
+
+    Google returns ``403 accessNotConfigured`` / ``SERVICE_DISABLED`` when the
+    underlying API (Gmail, Drive, Tasks, People, …) has not been enabled in the
+    Cloud project that owns the OAuth client. That is not fixable by refreshing
+    the token, so we surface the activation URL from Google's error payload
+    instead of a bare HTTP error.
+    """
+    response = exc.response
+    if response is None or response.status_code != 403:
+        return
+    try:
+        body = response.json()
+    except ValueError:
+        return
+    error = body.get("error", {})
+    reasons = {e.get("reason") for e in error.get("errors", [])}
+    reasons.update(
+        d.get("reason") for d in error.get("details", []) if isinstance(d, dict)
+    )
+    if not (reasons & {"accessNotConfigured", "SERVICE_DISABLED"}):
+        return
+
+    service = error.get("status", "the Google API")
+    activation_url = ""
+    for detail in error.get("details", []):
+        metadata = detail.get("metadata", {})
+        if detail.get("reason") == "SERVICE_DISABLED":
+            service = metadata.get("serviceTitle") or metadata.get(
+                "service", service
+            )
+            activation_url = metadata.get("activationUrl", "")
+            break
+    hint = (
+        f" Enable it at: {activation_url}" if activation_url else
+        " Enable it in Google Cloud Console (APIs & Services → Library)."
+    )
+    raise GoogleAuthError(
+        f"{service} is not enabled for this Google Cloud project."
+        f"{hint} Then retry — no re-authentication is needed."
+    ) from exc
+
+
 def current_access_token(credentials_path: str) -> str:
     """Return the current access token from the credentials file (empty if absent)."""
     tokens = load_tokens(credentials_path) or {}
@@ -112,6 +156,7 @@ def call_with_refresh(
     try:
         return api_fn(token, *args, **kwargs)
     except httpx.HTTPStatusError as exc:
+        _raise_if_service_disabled(exc)
         if exc.response is None or exc.response.status_code != 401:
             raise
         logger.info(

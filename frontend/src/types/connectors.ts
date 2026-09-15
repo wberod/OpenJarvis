@@ -425,6 +425,39 @@ export const SOURCE_CATALOG: ConnectorMeta[] = [
     ],
   },
   {
+    connector_id: 'ms365',
+    display_name: 'Microsoft 365',
+    auth_type: 'oauth',
+    category: 'communication',
+    icon: 'Mail',
+    color: 'text-sky-400',
+    description: 'Outlook mail and calendar via Microsoft Graph',
+    unitLabel: 'items',
+    steps: [
+      {
+        label: 'Go to the Azure Portal → App Registrations → click "+ New registration". Name it (e.g. "SC_Assist"), select the account type for your tenant, and click Register',
+        url: 'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade',
+        urlLabel: 'Open Azure App Registrations',
+      },
+      {
+        label: 'Under "API Permissions" → "Add a permission" → "Microsoft Graph" → "Delegated permissions" → add "User.Read", "Mail.Read", and "Calendars.Read" → click "Add permissions"',
+      },
+      {
+        label: 'Under "Certificates & secrets" → "New client secret" → set a description and expiry → "Add" → copy the secret "Value" immediately',
+      },
+      {
+        label: 'Under "Authentication" → "Add a platform" → "Web" → add the redirect URI shown during connect (it points back to this OpenJarvis server)',
+      },
+      {
+        label: 'Go to "Overview" and copy the "Application (client) ID". Paste the Client ID and Client Secret below, then complete the Microsoft sign-in consent',
+      },
+    ],
+    inputFields: [
+      { name: 'email', placeholder: 'Application (client) ID', type: 'text' },
+      { name: 'password', placeholder: 'Client Secret Value', type: 'password' },
+    ],
+  },
+  {
     connector_id: 'dropbox',
     display_name: 'Dropbox',
     auth_type: 'oauth',

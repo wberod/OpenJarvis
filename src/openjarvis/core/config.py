@@ -968,12 +968,29 @@ class BrowserConfig:
 
 
 @dataclass(slots=True)
+class FilesystemConfig:
+    """Filesystem tool settings — read/write/open path restrictions."""
+
+    allowed_write_dirs: list = field(
+        default_factory=lambda: [
+            "~/Documents",
+            "~/Notes",
+            "~/Desktop",
+        ],
+    )
+    allowed_read_dirs: list = field(
+        default_factory=list,
+    )
+
+
+@dataclass(slots=True)
 class ToolsConfig:
     """Tools primitive settings — wraps storage and MCP configuration."""
 
     storage: StorageConfig = field(default_factory=StorageConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
+    filesystem: FilesystemConfig = field(default_factory=FilesystemConfig)
     enabled: str = ""  # comma-separated default tools
 
 
@@ -1439,6 +1456,24 @@ class OperatorsConfig:
 
 
 @dataclass(slots=True)
+class WakeWordConfig:
+    """Wake-word detection and hands-free command settings."""
+
+    enabled: bool = False
+    auto_start: bool = False
+    phrase: str = "hey jarvis"
+    model_id: str = "hey_jarvis_v0.1"
+    model_path: str = ""
+    input_device: str = ""
+    threshold: float = 0.5
+    cooldown_seconds: float = 2.0
+    silence_seconds: float = 1.5
+    max_command_seconds: float = 30.0
+    follow_up_seconds: float = 15.0
+    browser_fallback_consent: bool = False
+
+
+@dataclass(slots=True)
 class SpeechConfig:
     """Speech-to-text settings."""
 
@@ -1448,6 +1483,7 @@ class SpeechConfig:
     language: str = ""  # Empty = auto-detect
     device: str = "auto"  # "auto", "cpu", "cuda"
     compute_type: str = "float16"  # "float16", "int8", "float32"
+    wake: WakeWordConfig = field(default_factory=WakeWordConfig)
 
 
 @dataclass(slots=True)
@@ -2200,6 +2236,7 @@ __all__ = [
     "EmailChannelConfig",
     "EngineConfig",
     "FeishuChannelConfig",
+    "FilesystemConfig",
     "GoogleChatChannelConfig",
     "GpuInfo",
     "HardwareInfo",

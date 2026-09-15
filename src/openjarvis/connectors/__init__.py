@@ -74,6 +74,11 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.connectors.ms365  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.connectors.gcalendar  # noqa: F401
 except ImportError:
     pass

@@ -2751,18 +2751,32 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(move |app| {
             // System tray
             let show = MenuItemBuilder::with_id("show", "Show / Hide").build(app)?;
             let health = MenuItemBuilder::with_id("health", "Health: starting...")
                 .enabled(false)
                 .build(app)?;
+            let start_listening =
+                MenuItemBuilder::with_id("wake-start", "Start Listening").build(app)?;
+            let stop_listening =
+                MenuItemBuilder::with_id("wake-stop", "Stop Listening").build(app)?;
             let quit = MenuItemBuilder::with_id("quit", "Quit OpenJarvis").build(app)?;
 
             let menu = MenuBuilder::new(app)
                 .item(&show)
                 .separator()
                 .item(&health)
+                .item(&start_listening)
+                .item(&stop_listening)
                 .separator()
                 .item(&quit)
                 .build()?;
@@ -2781,6 +2795,20 @@ pub fn run() {
                                 let _ = window.set_focus();
                             }
                         }
+                    }
+                    "wake-start" | "wake-stop" => {
+                        let action = if event.id().as_ref() == "wake-start" {
+                            "start"
+                        } else {
+                            "stop"
+                        };
+                        tauri::async_runtime::spawn(async move {
+                            let url = format!(
+                                "http://127.0.0.1:{}/v1/speech/wake/{}",
+                                JARVIS_PORT, action
+                            );
+                            let _ = reqwest::Client::new().post(url).send().await;
+                        });
                     }
                     "quit" => {
                         app.exit(0);

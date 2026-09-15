@@ -14,7 +14,7 @@ import type {
   ToolCallInfo,
   TokenUsage,
 } from '../types';
-import type { ManagedAgent } from './api';
+import type { ManagedAgent, WakeStatus } from './api';
 
 export interface CachedConnector {
   connector_id: string;
@@ -81,6 +81,9 @@ interface Settings {
   maxTokens: number;
   speechEnabled: boolean;
   voiceEnabled: boolean;
+  wakeOnboarded: boolean;
+  wakeEnabled: boolean;
+  wakeCloudFallback: boolean;
 }
 
 function loadSettings(): Settings {
@@ -95,6 +98,9 @@ function loadSettings(): Settings {
     maxTokens: 4096,
     speechEnabled: true,
     voiceEnabled: true,
+    wakeOnboarded: false,
+    wakeEnabled: false,
+    wakeCloudFallback: true,
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
@@ -135,6 +141,10 @@ interface AppState {
 
   // Settings
   settings: Settings;
+  wakeStatus: WakeStatus | null;
+  pendingVoiceCommand: string | null;
+  wakeConversationActive: boolean;
+  voicePlaybackState: 'idle' | 'loading' | 'speaking';
 
   // Command palette
   commandPaletteOpen: boolean;
@@ -194,6 +204,11 @@ interface AppState {
 
   // Actions: settings
   updateSettings: (partial: Partial<Settings>) => void;
+  setWakeStatus: (status: WakeStatus | null) => void;
+  queueVoiceCommand: (command: string) => void;
+  clearVoiceCommand: () => void;
+  setWakeConversationActive: (active: boolean) => void;
+  setVoicePlaybackState: (state: 'idle' | 'loading' | 'speaking') => void;
 
   // Actions: UI
   setCommandPaletteOpen: (open: boolean) => void;
@@ -258,6 +273,10 @@ export const useAppStore = create<AppState>((set, get) => {
     savings: null,
 
     settings: loadSettings(),
+    wakeStatus: null,
+    pendingVoiceCommand: null,
+    wakeConversationActive: false,
+    voicePlaybackState: 'idle',
 
     commandPaletteOpen: false,
     sidebarOpen: true,
@@ -486,6 +505,11 @@ export const useAppStore = create<AppState>((set, get) => {
       saveSettings(updated);
       set({ settings: updated });
     },
+    setWakeStatus: (wakeStatus: WakeStatus | null) => set({ wakeStatus }),
+    queueVoiceCommand: (pendingVoiceCommand: string) => set({ pendingVoiceCommand, wakeConversationActive: true }),
+    clearVoiceCommand: () => set({ pendingVoiceCommand: null }),
+    setWakeConversationActive: (wakeConversationActive: boolean) => set({ wakeConversationActive }),
+    setVoicePlaybackState: (voicePlaybackState: 'idle' | 'loading' | 'speaking') => set({ voicePlaybackState }),
 
     // ── UI ──────────────────────────────────────────────────────────
 
@@ -501,7 +525,18 @@ export const useAppStore = create<AppState>((set, get) => {
     managedAgentsLoading: false,
     selectedAgentId: null,
 
-    setManagedAgents: (agents) => set({ managedAgents: agents }),
+    setManagedAgents: (agents) => set((s) => {
+      const next: { managedAgents: ManagedAgent[]; selectedAgentId?: string | null } = {
+        managedAgents: agents,
+      };
+      // SC_Assist is the company assistant and the default agent: auto-select
+      // it on load when nothing is selected (or the previous pick vanished).
+      if (!s.selectedAgentId || !agents.some((a) => a.id === s.selectedAgentId)) {
+        const scAssist = agents.find((a) => a.name === 'SC_Assist');
+        if (scAssist) next.selectedAgentId = scAssist.id;
+      }
+      return next;
+    }),
     setManagedAgentsLoading: (loading) => set({ managedAgentsLoading: loading }),
     setSelectedAgentId: (id) => set({ selectedAgentId: id }),
 

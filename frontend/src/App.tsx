@@ -16,8 +16,13 @@ import { fetchModels, fetchServerInfo, fetchSavings, submitSavings, isTauri } fr
 import { OptInModal } from './components/OptInModal';
 import { UpdateChecker } from './components/Desktop/UpdateChecker';
 import { track, hashId } from './lib/analytics';
+import { useWakeWord } from './hooks/useWakeWord';
+import { useAudioUnlock } from './hooks/useAudioUnlock';
+import { WakeWordOnboarding } from './components/WakeWordOnboarding';
 
 export default function App() {
+  useWakeWord();
+  useAudioUnlock();
   const [setupDone, setSetupDone] = useState(!isTauri());
   const handleSetupReady = useCallback(() => {
     setSetupDone(true);
@@ -65,20 +70,21 @@ export default function App() {
     return () => clearInterval(interval);
   }, [importOverlay]);
 
-  // Fetch models on mount
+  // Fetch models and server info, then select the server-configured model.
   useEffect(() => {
-    fetchModels()
-      .then((m) => {
+    Promise.all([fetchModels(), fetchServerInfo()])
+      .then(([m, info]) => {
         setModels(m);
-        if (!selectedModel && m.length > 0) setSelectedModel(m[0].id);
+        setServerInfo(info);
+        if (!selectedModel && m.length > 0) {
+          const preferred = m.find((model) => model.id === info.model)?.id ?? m[0].id;
+          setSelectedModel(preferred);
+        }
       })
-      .catch(() => setModels([]))
+      .catch(() => {
+        setModels([]);
+      })
       .finally(() => setModelsLoading(false));
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Fetch server info
-  useEffect(() => {
-    fetchServerInfo().then(setServerInfo).catch(() => {});
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Poll savings and optionally share to Supabase
@@ -199,6 +205,7 @@ export default function App() {
       {optInModalOpen && (
         <OptInModal onClose={() => setOptInModalOpen(false)} />
       )}
+      {!optInModalOpen && <WakeWordOnboarding />}
     </>
   );
 }

@@ -19,7 +19,7 @@ export function MicButton({ state, onClick, disabled, reason }: MicButtonProps) 
         : reason === 'streaming'
           ? 'Wait for response'
           : state === 'recording'
-            ? 'Stop recording'
+            ? 'Listening...'
             : state === 'transcribing'
               ? 'Transcribing...'
               : 'Voice input';

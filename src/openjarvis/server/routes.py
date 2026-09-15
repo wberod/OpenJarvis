@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
+import os
+import tempfile
 import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -15,6 +19,8 @@ from openjarvis.core.paths import get_config_dir
 from openjarvis.core.registry import TTSRegistry
 from openjarvis.core.types import Message, Role
 from openjarvis.server.models import (
+    AgentRunRequest,
+    AgentRunResponse,
     ChatCompletionChunk,
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -22,6 +28,7 @@ from openjarvis.server.models import (
     ChoiceMessage,
     ComplexityInfo,
     DeltaMessage,
+    DocumentAttachment,
     ModelListResponse,
     ModelObject,
     StreamChoice,
@@ -31,18 +38,84 @@ from openjarvis.server.models import (
 
 router = APIRouter()
 
+_TEXT_DOC_SUFFIXES = {
+    ".txt",
+    ".md",
+    ".csv",
+    ".json",
+    ".js",
+    ".ts",
+    ".py",
+    ".html",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+
+
+def _is_text_document(doc: DocumentAttachment) -> bool:
+    """Return True if the attached document is plain text."""
+    if doc.mime.startswith("text/"):
+        return True
+    if doc.mime in ("application/json", "application/x-yaml", "application/toml"):
+        return True
+    return Path(doc.name).suffix.lower() in _TEXT_DOC_SUFFIXES
+
+
+def _extract_document_text(doc: DocumentAttachment) -> str:
+    """Extract the textual content of an attached document."""
+    if _is_text_document(doc):
+        # Already text; just truncate to a generous chunk.
+        return doc.content[:50000]
+
+    if doc.mime == "application/pdf" or doc.name.lower().endswith(".pdf"):
+        try:
+            data = base64.b64decode(doc.content)
+        except Exception as exc:
+            return f"[Could not decode {doc.name}: {exc}]"
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as f:
+            f.write(data)
+            tmp_path = f.name
+
+        try:
+            from openjarvis.tools.pdf_tool import PDFExtractTool
+
+            tool = PDFExtractTool()
+            result = tool.execute(file_path=tmp_path, max_chars=15000)
+            if result.success:
+                return str(result.content or "")
+            return f"[Could not extract {doc.name}: {result.content}]"
+        except Exception as exc:
+            return f"[Could not process {doc.name}: {exc}]"
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    return f"[Unsupported document type: {doc.name} ({doc.mime})]"
+
 
 def _to_messages(chat_messages) -> list[Message]:
     """Convert Pydantic ChatMessage objects to core Message objects."""
     messages = []
     for m in chat_messages:
         role = Role(m.role) if m.role in {r.value for r in Role} else Role.USER
+        content = m.content or ""
+        if m.documents:
+            doc_blocks = [
+                f"--- Document: {doc.name} ---\n{_extract_document_text(doc)}"
+                for doc in m.documents
+            ]
+            content = content + "\n\n" + "\n\n".join(doc_blocks) if content else "\n\n".join(doc_blocks)
         messages.append(
             Message(
                 role=role,
-                content=m.content or "",
+                content=content,
                 name=m.name,
                 tool_call_id=m.tool_call_id,
+                images=m.images if m.images else None,
             )
         )
     return messages
@@ -282,6 +355,238 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
     return response
 
 
+def _run_managed_agent(
+    request: Request,
+    request_body: AgentRunRequest,
+) -> AgentRunResponse:
+    """Run a managed agent from ``agents.db`` synchronously for chat.
+
+    The user message is queued as a pending message, then a single
+    ``AgentExecutor`` tick is run so the agent sees its standing
+    instruction plus the new input.  Tool calls respect the server's
+    approval callback.
+    """
+    agent_id = request_body.agent_id
+    manager = getattr(request.app.state, "agent_manager", None)
+    if manager is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Agent manager not configured on this server.",
+        )
+    agent_record = manager.get_agent(agent_id)
+    if not agent_record:
+        raise HTTPException(status_code=404, detail="Managed agent not found.")
+
+    # SC_Assist requires a linked Microsoft 365 account. Ask the caller to
+    # sign in before the agent can run so we do not waste a model turn on
+    # an auth error deep in the tool loop.
+    if agent_record.get("name") == "SC_Assist":
+        from openjarvis.connectors.ms365 import load_user_tokens
+        from openjarvis.tools.ms365_tools import _not_connected
+
+        user_id = request_body.user_id or ""
+        if not load_user_tokens(user_id):
+            auth_result = _not_connected(user_id)
+            if auth_result.metadata.get("sign_in_url"):
+                sign_in_url = auth_result.metadata["sign_in_url"]
+                content = (
+                    "Microsoft 365 sign-in is required to use SC_Assist. "
+                    f"Please [sign in with your Microsoft account]({sign_in_url}). "
+                    "Once you have signed in, continue the conversation."
+                )
+            else:
+                content = auth_result.content
+            return AgentRunResponse(
+                content=content,
+                tool_results=[],
+                turns=0,
+                model=agent_record.get("config", {}).get("model", ""),
+                metadata=auth_result.metadata,
+            )
+
+    engine = getattr(request.app.state, "engine", None)
+    if engine is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Inference engine not available.",
+        )
+
+    chat_messages = _to_messages(request_body.messages)
+    chat_input = chat_messages[-1].text if chat_messages else ""
+    chat_images = chat_messages[-1].images if chat_messages else None
+    chat_conversation = chat_messages[:-1] if len(chat_messages) > 1 else []
+
+    from openjarvis.agents.executor import AgentExecutor
+    from openjarvis.core.events import get_event_bus
+    from openjarvis.server.agent_manager_routes import _make_lightweight_system
+    from openjarvis.server.confirm_callback import ServerToolApprovalCallback
+
+    model = (
+        request_body.model
+        or agent_record.get("config", {}).get("model")
+        or getattr(request.app.state, "model", "")
+    )
+    system = _make_lightweight_system(
+        engine, model, getattr(request.app.state, "config", None)
+    )
+    bus = getattr(request.app.state, "bus", None) or get_event_bus()
+
+    # Attach MCP-discovered tools (e.g. a configured Box MCP server) so the
+    # executor can resolve them via ``config["tools"]`` names or the
+    # ``include_mcp_tools`` flag. The lightweight system has no
+    # tool_executor of its own, so without this every MCP tool call is a
+    # silent no-op on this path.
+    try:
+        from openjarvis.server.agent_manager_routes import _get_mcp_tools
+        from openjarvis.tools._stubs import ToolExecutor
+
+        _oai_tools, mcp_adapters = _get_mcp_tools(request.app.state)
+        if mcp_adapters:
+            system.tool_executor = ToolExecutor(
+                list(mcp_adapters.values()), bus
+            )
+    except Exception:
+        pass  # MCP discovery is best-effort
+
+    executor = AgentExecutor(
+        manager=manager,
+        event_bus=bus,
+        trace_store=getattr(request.app.state, "trace_store", None),
+    )
+    executor.set_system(system)
+    # Match the top-level agent: require frontend approval for sensitive tools.
+    executor._confirm_callback = ServerToolApprovalCallback()
+
+    # Prepare a chat-friendly copy of the agent config.  The full financial
+    # planner instruction is kept as the system prompt, but it is NOT duplicated
+    # into the user input below, and runtime params (model, temperature,
+    # max_tokens, max_turns) are propagated from the frontend request.
+    config = dict(agent_record.get("config", {}))
+    config["model"] = model
+    config["temperature"] = request_body.temperature
+    config["max_tokens"] = request_body.max_tokens
+    # Per-user identity so user-scoped tools (ms365_* etc.) resolve the
+    # caller's own OAuth tokens rather than a shared credential file.
+    if request_body.user_id:
+        config["user_id"] = request_body.user_id
+    # Keep the agent from looping through dozens of tool calls for a casual chat,
+    # but allow enough turns to create a few calendar reminders in one request.
+    config["max_turns"] = min(config.get("max_turns", 10), 10)
+
+    instruction = config.get("instruction", "")
+    config["system_prompt"] = config.get("system_prompt") or instruction
+    if config["system_prompt"]:
+        config["system_prompt"] += (
+            "\n\n=== Chat mode ===\n"
+            "You are replying to a quick chat message. Keep the response brief, "
+            "conversational, and focused. Ask clarifying questions if needed. "
+            "Do NOT produce a full multi-section financial report unless the user "
+            "explicitly asks for one.\n\n"
+            "IMPORTANT: When the user asks to schedule or create a calendar event or "
+            "reminder, you MUST call the create_calendar_event tool (single event) "
+            "or create_multiple_calendar_events tool (multiple events). Do NOT say "
+            "the event was created unless the tool returns success."
+        )
+    # Clear the standing instruction so _invoke_agent does not prepend the full
+    # prompt text to the user input, avoiding a duplicate system prompt.
+    config["instruction"] = ""
+
+    agent_copy = dict(agent_record)
+    agent_copy["config"] = config
+    agent_copy["chat_input"] = chat_input
+    agent_copy["chat_images"] = chat_images
+    agent_copy["chat_conversation"] = chat_conversation
+
+    result = executor._run_with_retries(agent_copy)
+    tool_results = [
+        {
+            "tool_name": tr.tool_name,
+            "content": tr.content,
+            "success": tr.success,
+            "arguments": getattr(tr, "metadata", {}).get("arguments", {}),
+        }
+        for tr in getattr(result, "tool_results", [])
+    ]
+    try:
+        manager.store_agent_response(
+            agent_id, result.content, tool_calls=tool_results or None
+        )
+    except Exception:
+        pass  # Best-effort persistence.
+
+    return AgentRunResponse(
+        content=result.content,
+        tool_results=tool_results,
+        turns=getattr(result, "turns", 0),
+        model=model,
+        metadata=getattr(result, "metadata", {}),
+    )
+
+
+@router.post("/v1/agent/run")
+async def agent_run(request_body: AgentRunRequest, request: Request):
+    """Run the configured agent with its tool loop (non-streaming).
+
+    This endpoint is intended for actions that require tool execution, such
+    as opening applications or writing files, where the streaming chat path
+    bypasses the agent and goes straight to the engine.
+
+    If ``agent_id`` is provided, the request is routed to a managed agent
+    from ``agents.db`` instead of the server's default top-level agent.
+    """
+    if request_body.agent_id:
+        response = await asyncio.to_thread(
+            _run_managed_agent, request, request_body
+        )
+        return response
+
+    agent = getattr(request.app.state, "agent", None)
+    if agent is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No agent configured on this server.",
+        )
+
+    # Build context from prior messages
+    from openjarvis.agents._stubs import AgentContext
+
+    ctx = AgentContext()
+    messages = _to_messages(request_body.messages)
+    if len(messages) > 1:
+        for msg in messages[:-1]:
+            ctx.conversation.add(msg)
+    input_text = messages[-1].content if messages else ""
+    ctx.metadata["images"] = messages[-1].images if messages and messages[-1].images else None
+
+    # Allow the request to override the model for this run
+    original_model = getattr(agent, "_model", None)
+    model = request_body.model or getattr(request.app.state, "model", "")
+    if model and original_model is not None:
+        agent._model = model
+
+    try:
+        result = await asyncio.to_thread(agent.run, input_text, context=ctx)
+    finally:
+        if original_model is not None:
+            agent._model = original_model
+
+    return AgentRunResponse(
+        content=result.content,
+        tool_results=[
+            {
+                "tool_name": tr.tool_name,
+                "content": tr.content,
+                "success": tr.success,
+                "arguments": tr.metadata.get("arguments", {}),
+            }
+            for tr in getattr(result, "tool_results", [])
+        ],
+        turns=getattr(result, "turns", 0),
+        model=model,
+        metadata=getattr(result, "metadata", {}),
+    )
+
+
 def _response_content(response) -> str:
     """Extract assistant text from an OpenAI-compatible response object."""
     content = ""
@@ -471,6 +776,7 @@ def _handle_agent(
 
     # Last message is the input
     input_text = req.messages[-1].content if req.messages else ""
+    ctx.metadata["images"] = req.messages[-1].images if req.messages and req.messages[-1].images else None
 
     # Override agent model for this request if the caller specified one
     original_model = agent._model
@@ -1199,7 +1505,10 @@ async def tts(request_body: TTSRequest):
     """Synthesize text to speech using the configured backend."""
     backend_key = request_body.backend or "fish"
     if not TTSRegistry.contains(backend_key):
-        raise HTTPException(status_code=400, detail=f"TTS backend '{backend_key}' not available")
+        raise HTTPException(
+            status_code=400,
+            detail=f"TTS backend '{backend_key}' not available",
+        )
 
     backend_cls = TTSRegistry.get(backend_key)
     backend = backend_cls()

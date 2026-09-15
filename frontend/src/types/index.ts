@@ -115,6 +115,12 @@ export interface LiveEnergyMetrics {
   duration_s: number;
 }
 
+export interface DocumentAttachment {
+  name: string;
+  mime: string;
+  content: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -127,6 +133,8 @@ export interface ChatMessage {
   usage?: TokenUsage;
   telemetry?: MessageTelemetry;
   audio?: { url: string };
+  images?: string[];
+  documents?: DocumentAttachment[];
 }
 
 export interface Conversation {

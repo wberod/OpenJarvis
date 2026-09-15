@@ -27,6 +27,9 @@ import {
   setInferenceSource,
   getCloudKeyStatus,
   saveCloudKey,
+  installWakeModel,
+  setWakeListening,
+  updateWakeSettings,
   isTauri,
   type InferenceSource,
 } from '../lib/api';
@@ -209,6 +212,8 @@ const themeOptions: { value: ThemeMode; label: string; icon: typeof Sun }[] = [
 export function SettingsPage() {
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
+  const wakeStatus = useAppStore((s) => s.wakeStatus);
+  const setWakeStatus = useAppStore((s) => s.setWakeStatus);
   const conversations = useAppStore((s) => s.conversations);
   const serverInfo = useAppStore((s) => s.serverInfo);
   const [healthy, setHealthy] = useState<boolean | null>(null);
@@ -695,6 +700,74 @@ export function SettingsPage() {
                 />
               </button>
             </SettingRow>
+            <SettingRow label="Voice replies" description="Speak assistant responses aloud">
+              <button
+                onClick={() => { updateSettings({ voiceEnabled: !settings.voiceEnabled }); showSaved(); }}
+                className="relative w-11 h-6 rounded-full transition-colors cursor-pointer"
+                style={{
+                  background: settings.voiceEnabled ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
+                }}
+              >
+                <span
+                  className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full transition-transform bg-white"
+                  style={{
+                    transform: settings.voiceEnabled ? 'translateX(20px)' : 'translateX(0)',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                  }}
+                />
+              </button>
+            </SettingRow>
+            <SettingRow label="Hey Jarvis" description={wakeStatus?.error || `Wake-word status: ${wakeStatus?.state ?? 'not configured'}`}>
+              <button
+                onClick={() => {
+                  const enabled = !settings.wakeEnabled;
+                  let useCloudFallback = settings.wakeCloudFallback;
+                  // The downloadable openWakeWord model is only "hey jarvis";
+                  // for any other phrase (e.g. "hey sc") use browser speech
+                  // recognition unless a local model is already installed.
+                  if (enabled && !wakeStatus?.model_installed && !useCloudFallback && wakeStatus?.phrase && wakeStatus.phrase !== 'hey jarvis') {
+                    useCloudFallback = true;
+                    updateSettings({ wakeCloudFallback: true });
+                  }
+                  updateSettings({ wakeOnboarded: true, wakeEnabled: enabled });
+                  void (async () => {
+                    if (enabled && !wakeStatus?.model_installed && !useCloudFallback) await installWakeModel(true);
+                    await updateWakeSettings({ enabled, auto_start: enabled, browser_fallback_consent: useCloudFallback });
+                    setWakeStatus(await setWakeListening(enabled));
+                    showSaved();
+                  })().catch(() => {});
+                }}
+                className="relative w-11 h-6 rounded-full transition-colors cursor-pointer"
+                style={{ background: settings.wakeEnabled ? 'var(--color-accent)' : 'var(--color-bg-tertiary)' }}
+              >
+                <span
+                  className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full transition-transform bg-white"
+                  style={{ transform: settings.wakeEnabled ? 'translateX(20px)' : 'translateX(0)', boxShadow: '0 1px 3px rgba(0,0,0,0.2)' }}
+                />
+              </button>
+            </SettingRow>
+            <SettingRow label="Browser fallback" description="May send ambient speech to the browser vendor and require internet">
+              <button
+                onClick={() => {
+                  const consent = !settings.wakeCloudFallback;
+                  updateSettings({ wakeCloudFallback: consent });
+                  void updateWakeSettings({ browser_fallback_consent: consent }).catch(() => {});
+                  showSaved();
+                }}
+                className="relative w-11 h-6 rounded-full transition-colors cursor-pointer"
+                style={{ background: settings.wakeCloudFallback ? 'var(--color-accent)' : 'var(--color-bg-tertiary)' }}
+              >
+                <span
+                  className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full transition-transform bg-white"
+                  style={{ transform: settings.wakeCloudFallback ? 'translateX(20px)' : 'translateX(0)', boxShadow: '0 1px 3px rgba(0,0,0,0.2)' }}
+                />
+              </button>
+            </SettingRow>
+            {wakeStatus?.model_installed && (
+              <div className="text-xs px-1" style={{ color: 'var(--color-text-tertiary)' }}>
+                Local model {wakeStatus.model_version || 'installed'} · openWakeWord wake-word weights: CC BY-NC-SA 4.0
+              </div>
+            )}
             <SettingRow label="Backend status" description="Requires Whisper, Deepgram, or another speech backend">
               <div className="flex items-center gap-2">
                 <span

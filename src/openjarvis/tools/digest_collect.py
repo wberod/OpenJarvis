@@ -570,14 +570,26 @@ class DigestCollectTool(BaseTool):
             summary_parts.append("=== ERRORS ===")
             summary_parts.extend(errors)
 
+        total_items = sum(len(v) for v in collected_docs.values())
+        content = "\n".join(summary_parts).strip()
+        if not content:
+            # An empty string reads as a tool failure to the model, which then
+            # apologizes or retries with a different tool. Say so explicitly.
+            content = (
+                f"No items found in {', '.join(sources)} within the last "
+                f"{hours_back:g} hours. The connector(s) are working; there is "
+                "simply nothing recent. Suggest a larger hours_back to look "
+                "further back."
+            )
+
         return ToolResult(
             tool_name="digest_collect",
-            content="\n".join(summary_parts),
+            content=content,
             success=True,
             metadata={
                 "sources_queried": sources,
                 "sources_ok": list(collected_docs.keys()),
                 "sources_failed": errors,
-                "total_items": sum(len(v) for v in collected_docs.values()),
+                "total_items": total_items,
             },
         )

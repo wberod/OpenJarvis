@@ -118,6 +118,21 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.tools.supabase_query  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.ms365_tools  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.agent_tools  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.tools.pdf_tool  # noqa: F401
 except ImportError:
     pass
@@ -144,6 +159,16 @@ except ImportError:
 
 try:
     import openjarvis.tools.digest_collect  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.open_app  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.create_calendar_event  # noqa: F401
 except ImportError:
     pass
 

@@ -79,6 +79,36 @@ enabled = true
 servers = '[{"name": "homeassistant", "url": "http://172.16.3.1:9583/private_abc123"}, {"name": "database", "command": "db-mcp-server", "args": ["--db", "postgres://localhost/mydb"]}]'
 ```
 
+### Box (hosted MCP at mcp.box.com)
+
+Box runs a hosted MCP server at `https://mcp.box.com`. It authenticates with
+a Bearer token obtained through the Box OAuth2 flow (Box does not support
+dynamic client registration, so the token must be provisioned out-of-band):
+
+1. In the Box Admin Console, enable the Box MCP server under
+   **Integrations → MCP**, or create a custom OAuth app in the Developer
+   Console with the `root_readwrite` and `ai.readwrite` scopes.
+2. Complete the OAuth2 flow (authorization URL
+   `https://account.box.com/api/oauth2/authorize`, token URL
+   `https://api.box.com/oauth2/token`) and capture the access token.
+3. Configure the server with the token:
+
+```toml
+[tools.mcp]
+enabled = true
+servers = '[{"name": "box", "url": "https://mcp.box.com", "token": "<box-access-token>"}]'
+```
+
+Managed agents with `include_mcp_tools = true` in their config (e.g. the
+built-in **SC_Assist** template) pick up every discovered Box tool
+automatically; otherwise list the Box tool names explicitly in the agent's
+`tools` config.
+
+!!! warning "Token expiry"
+    Box access tokens expire (default ~60 minutes). For unattended use,
+    rotate the `token` value or front the endpoint with a small proxy that
+    refreshes the token via your stored `refresh_token`.
+
 ### Tool Filtering
 
 When a server exposes many tools but you only need a few, use `include_tools` to whitelist:

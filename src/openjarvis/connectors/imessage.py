@@ -123,8 +123,12 @@ class IMessageConnector(BaseConnector):
 
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        except sqlite3.OperationalError:
-            return
+        except sqlite3.OperationalError as exc:
+            raise RuntimeError(
+                "Cannot read the iMessage database — grant Full Disk Access "
+                "to the app running OpenJarvis in System Settings → Privacy "
+                "& Security → Full Disk Access, then restart it."
+            ) from exc
 
         try:
             # ------------------------------------------------------------------

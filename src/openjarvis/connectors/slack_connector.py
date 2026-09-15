@@ -66,18 +66,48 @@ def _slack_api_conversations_list(
     dict
         Raw API response containing ``channels`` list and ``response_metadata``.
     """
-    # Include every conversation type the bot can list — public + private
-    # channels, multi-person DMs, and 1:1 DMs — so a "connect and sync"
-    # flow indexes everything the token has access to without the user
-    # picking channels (matches Gmail's connect-and-go behavior).
-    params: Dict[str, str] = {
-        "types": "public_channel,private_channel,mpim,im",
-        "exclude_archived": "true",
-    }
+    # Include every conversation type the token can list — public + private
+    # channels, multi-person DMs, and 1:1 DMs — so a "connect and sync" flow
+    # indexes everything the token has access to without the user picking
+    # channels (matches Gmail's connect-and-go behavior).
+    #
+    # If the token lacks the read scope for one type, Slack returns
+    # ``missing_scope`` with ``needed`` set to the missing scope. We drop the
+    # offending type and retry so we still sync what the token can access
+    # rather than aborting the whole sync.
+    params: Dict[str, str] = {"exclude_archived": "true"}
     if cursor:
         params["cursor"] = cursor
 
-    return _slack_api_with_retry("conversations.list", token, params)
+    conversation_types = ["public_channel", "private_channel", "mpim", "im"]
+    scope_to_type: Dict[str, str] = {
+        "channels:read": "public_channel",
+        "groups:read": "private_channel",
+        "mpim:read": "mpim",
+        "im:read": "im",
+    }
+
+    while conversation_types:
+        params["types"] = ",".join(conversation_types)
+        data = _slack_api_with_retry("conversations.list", token, params)
+
+        if not data.get("ok", True) and data.get("error") == "missing_scope":
+            needed: str = data.get("needed", "")
+            drop_type = scope_to_type.get(needed)
+            if drop_type and drop_type in conversation_types:
+                logger.warning(
+                    "Slack token lacks %s; dropping %s from conversations.list",
+                    needed,
+                    drop_type,
+                )
+                conversation_types.remove(drop_type)
+                continue
+            # Unknown/untokenizable missing scope — stop retrying.
+            break
+
+        return data
+
+    return {}
 
 
 def _slack_api_conversations_history(

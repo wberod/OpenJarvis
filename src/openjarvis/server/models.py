@@ -13,12 +13,20 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 
+class DocumentAttachment(BaseModel):
+    name: str
+    mime: str
+    content: str
+
+
 class ChatMessage(BaseModel):
     role: str
     content: str = ""
     name: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
+    images: Optional[List[str]] = None
+    documents: Optional[List[DocumentAttachment]] = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -28,6 +36,29 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: int = 1024
     stream: bool = False
     tools: Optional[List[Dict[str, Any]]] = None
+
+
+class AgentRunRequest(BaseModel):
+    """Request to run the configured agent with its tool loop."""
+
+    model: Optional[str] = None
+    messages: List[ChatMessage]
+    temperature: float = 0.7
+    max_tokens: int = 1024
+    agent_id: Optional[str] = None
+    # Stable per-client identity (frontend localStorage UUID). Lets
+    # user-scoped tools (e.g. ms365_*) resolve per-user OAuth tokens.
+    user_id: Optional[str] = None
+
+
+class AgentRunResponse(BaseModel):
+    """Result of an agent run, including tool calls and turns."""
+
+    content: str
+    tool_results: List[Dict[str, Any]] = Field(default_factory=list)
+    turns: int = 0
+    model: str = ""
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class TTSRequest(BaseModel):
