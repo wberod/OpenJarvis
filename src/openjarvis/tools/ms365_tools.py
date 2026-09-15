@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -25,6 +26,34 @@ from openjarvis.connectors.ms365 import (
 from openjarvis.core.registry import ToolRegistry
 from openjarvis.core.types import ToolResult
 from openjarvis.tools._stubs import BaseTool, ToolSpec
+
+
+def _ms_auth_start_url() -> Optional[str]:
+    """Resolve the shared Sheridan Microsoft sign-in start URL.
+
+    OpenJarvis does not own the Microsoft consent screen.  All Sheridan apps
+    route users through the Calendar/BookMe auth API
+    (``/api/auth/microsoft``).  The start URL can be set explicitly via
+    ``OPENJARVIS_MS_AUTH_URL``; otherwise it is derived from
+    ``MICROSOFT_REDIRECT_URI`` or ``AZURE_REDIRECT_URI`` by replacing the
+    callback path with ``/api/auth/microsoft``.
+    """
+    explicit = os.environ.get("OPENJARVIS_MS_AUTH_URL", "").rstrip("/")
+    if explicit:
+        return explicit
+
+    redirect_uri = (
+        os.environ.get("MICROSOFT_REDIRECT_URI", "")
+        or os.environ.get("AZURE_REDIRECT_URI", "")
+        or ""
+    )
+    if not redirect_uri:
+        return None
+
+    parsed = urlsplit(redirect_uri)
+    # Drop the existing callback path and point to the shared auth API.
+    path = "/api/auth/microsoft"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def _not_connected(user_id: Optional[str] = None) -> ToolResult:
@@ -47,30 +76,22 @@ def _not_connected(user_id: Optional[str] = None) -> ToolResult:
 
     if not creds:
         content = (
-            "Microsoft 365 is not configured: the Entra app credentials are "
-            "missing. An admin must set OPENJARVIS_MICROSOFT_CLIENT_ID and "
-            "OPENJARVIS_MICROSOFT_CLIENT_SECRET (and optionally "
-            "OPENJARVIS_MICROSOFT_TENANT_ID), then connect the 'ms365' "
-            "connector. Tell the user you can't reach their Microsoft "
-            "account until that is done."
+            "Microsoft 365 is not configured. An admin must set "
+            "OPENJARVIS_MICROSOFT_CLIENT_ID and OPENJARVIS_MICROSOFT_CLIENT_SECRET "
+            "(or the plain MICROSOFT_* equivalents)."
         )
         return ToolResult(
             tool_name="ms365", content=content, success=False,
             metadata={"auth_required": True, "configured": False},
         )
 
-    # Email identities authenticate through the SC Hub (the hub owns the
-    # Microsoft login and stores tokens in its Supabase profiles table).
+    # Email identities authenticate through the shared Sheridan auth API.
     if user_id and "@" in user_id:
-        sign_in_url = os.environ.get(
+        sign_in_url = _ms_auth_start_url() or os.environ.get(
             "OPENJARVIS_HUB_URL", "https://hub.sheridanfunds.com"
         ).rstrip("/")
         content = (
-            "Microsoft 365 sign-in required. This user's Microsoft account "
-            "is not connected, so mail and calendar tools cannot run. Ask "
-            "the user to sign in with their Microsoft account in the SC Hub "
-            f"at {sign_in_url} — their Microsoft permissions are granted "
-            "there. After they confirm sign-in, retry the tool."
+            f"Microsoft 365 sign-in required: {sign_in_url}"
         )
     else:
         # Non-email identity (dev / standalone): the OAuth consent flow is
@@ -81,11 +102,7 @@ def _not_connected(user_id: Optional[str] = None) -> ToolResult:
             path += f"?user={user_id}"
         sign_in_url = f"{base}{path}" if base else path
         content = (
-            "Microsoft 365 sign-in required. The user's Microsoft account is "
-            "not connected, so mail and calendar tools cannot run. Ask the "
-            "user to sign in with their Microsoft account here: "
-            f"{sign_in_url}\n"
-            "After they complete the consent, retry the tool."
+            f"Microsoft 365 sign-in required: {sign_in_url}"
         )
     return ToolResult(
         tool_name="ms365",
