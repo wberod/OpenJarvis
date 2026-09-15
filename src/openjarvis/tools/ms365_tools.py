@@ -74,10 +74,19 @@ def _not_connected(user_id: Optional[str] = None) -> ToolResult:
     # Email identities authenticate through the SC Hub.
     if user_id and "@" in user_id:
         sign_in_url = _ms_auth_start_url()
-        if not (os.environ.get("SUPABASE_HUB_URL") and os.environ.get("SUPABASE_HUB_KEY")):
+        hub_url = (
+            os.environ.get("SUPABASE_HUB_URL", "")
+            or os.environ.get("HUB_SUPABASE_URL", "")
+        )
+        hub_key = (
+            os.environ.get("SUPABASE_HUB_KEY", "")
+            or os.environ.get("HUB_SUPABASE_SERVICE_ROLE_KEY", "")
+        )
+        if not (hub_url and hub_key):
             content = (
                 "OpenJarvis cannot read Microsoft tokens from the SC Hub "
-                f"({sign_in_url}). Please set SUPABASE_HUB_URL and SUPABASE_HUB_KEY "
+                f"({sign_in_url}). Please set SUPABASE_HUB_URL/HUB_SUPABASE_URL "
+                "and SUPABASE_HUB_KEY/HUB_SUPABASE_SERVICE_ROLE_KEY "
                 "in the environment, then sign in at the hub."
             )
             return ToolResult(

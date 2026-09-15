@@ -47,9 +47,12 @@ def _resolve_project(project: str) -> Tuple[Optional[str], Optional[str]]:
     env = _PROJECT_ENV.get(project.strip().lower())
     if env is None:
         return None, None
-    url = os.environ.get(env[0], "").rstrip("/")
+    url = os.environ.get(env[0], "")
     key = os.environ.get(env[1], "")
-    return (url or None), (key or None)
+    if not (url and key) and env[0] == "SUPABASE_HUB_URL":
+        url = os.environ.get("HUB_SUPABASE_URL", "")
+        key = os.environ.get("HUB_SUPABASE_SERVICE_ROLE_KEY", "")
+    return (url.rstrip("/") or None), (key or None)
 
 
 @ToolRegistry.register("supabase_query")

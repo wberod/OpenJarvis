@@ -79,8 +79,14 @@ _PROFILE_EXPIRY_COL = os.environ.get("MS365_PROFILE_EXPIRY_COL", "microsoft_toke
 
 def _hub_supabase() -> Optional[tuple]:
     """Return (base_url, key) for the hub Supabase project, or None."""
-    url = os.environ.get("SUPABASE_HUB_URL", "").rstrip("/")
-    key = os.environ.get("SUPABASE_HUB_KEY", "")
+    url = (
+        os.environ.get("SUPABASE_HUB_URL", "")
+        or os.environ.get("HUB_SUPABASE_URL", "")
+    ).rstrip("/")
+    key = (
+        os.environ.get("SUPABASE_HUB_KEY", "")
+        or os.environ.get("HUB_SUPABASE_SERVICE_ROLE_KEY", "")
+    )
     return (url, key) if url and key else None
 
 
